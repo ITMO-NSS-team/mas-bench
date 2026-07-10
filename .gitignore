@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# experiments/ holds content (systems + benchmarks). Adapter code under
+# systems/ is tracked in full; benchmark dirs track only the committed recipe
+# (manifest.toml + builder.py + questions.jsonl), while any raw/generated data
+# is ignored.
+/experiments/*
+!/experiments/benchmarks
+!/experiments/systems
+/experiments/benchmarks/*/*
+!/experiments/benchmarks/*/manifest.toml
+!/experiments/benchmarks/*/builder.py
+!/experiments/benchmarks/*/questions.jsonl
+
+uv.lock
+results/
+logs/
+.env
+
+.DS_Store
+.claude/
+automas-research/

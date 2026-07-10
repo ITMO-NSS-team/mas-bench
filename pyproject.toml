@@ -1,0 +1,47 @@
+[build-system]
+requires = ["uv_build>=0.9.30,<0.10.0"]
+build-backend = "uv_build"
+
+[project]
+name = "benchlib"
+version = "0.1.0"
+description = "Evaluating Auto-Generated Multi-Agent Systems on direct QA tasks (no retrieval)"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "pydantic>=2.12.5",
+    "pydantic-ai>=1.56.0",
+    "pydantic-monty>=0.0.18",
+    "logly>=0.1.6,<0.2.0",  # 0.2.0 changed logger.configure()'s signature
+    "tqdm>=4.67.3",
+    "genai-prices>=0.0.62",
+    "rich>=15.0.0",
+    "numpy>=2.4.2",
+]
+
+[project.scripts]
+bench = "benchlib.cli:main"
+
+
+[dependency-groups]
+dev = ["pytest>=8.4.0"]
+swarm_agentic = ["langchain-openai>=0.3.0", "langchain-core>=0.3.0"]
+
+# automas installs from local source (its deps are heavy/optional, kept out of
+# this lockfile's default resolution):
+#   uv pip install -e automas-research/
+
+[tool.uv]
+# automas' own opentelemetry-api cap is relaxed (>=1.39,<1.42, see
+# automas-research/pyproject.toml) to line up with pydantic-ai's
+# opentelemetry-sdk>=1.39 requirement; keep the whole stack pinned in that
+# window so api/sdk stay in lockstep once automas is installed alongside it.
+constraint-dependencies = [
+    "opentelemetry-api>=1.39,<1.42",
+    "opentelemetry-sdk>=1.39,<1.42",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
