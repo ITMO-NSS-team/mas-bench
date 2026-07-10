@@ -79,7 +79,8 @@ def llm_accuracy(
 
     result = _judge_agent().run_sync(prompt, model=model)
     if usage_sink is not None:
-        usage = result.usage()
+        usage_value = result.usage
+        usage = usage_value() if callable(usage_value) else usage_value
         usage_sink["prompt"] = usage_sink.get("prompt", 0) + (usage.input_tokens or 0)
         usage_sink["completion"] = usage_sink.get("completion", 0) + (
             usage.output_tokens or 0

@@ -1,0 +1,7 @@
+[07/10/26 23:35:51] INFO     automas.meta_agents.pool_gen:69 Creating 1 agents: ['ResearchAgent']
+[07/10/26 23:35:51] INFO     automas.meta_agents.pool_gen:92 Successfully created agent pool with 1 agents
+[07/10/26 23:35:51] INFO     automas.meta_agents.graph_gen:180 Generating workflow graph for 1 agents
+[07/10/26 23:35:53] INFO     automas.meta_agents.graph_gen:205 Successfully created pipeline
+[07/10/26 23:35:53] INFO     automas.pipeline.pipeline:175 Starting pipeline execution
+[07/10/26 23:35:53] INFO     automas.pipeline.pipeline:179 Executing level 0 with 1 node(s)
+[07/10/26 23:35:53] INFO     automas.pipeline.pipeline:93 Executing node: ResearchAgent (id: ad71c707)
