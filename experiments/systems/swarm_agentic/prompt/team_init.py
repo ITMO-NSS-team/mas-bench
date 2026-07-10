@@ -17,8 +17,27 @@ INIT_TEAM_TEMPLATE = """You are an expert in designing a highly efficient, speci
 - Each step can only be assigned to a single role and cannot involve multiple roles simultaneously.
 - The resulting team structure should allow for easy scalability and clarity, ensuring that each module can be independently optimized or replaced without affecting other parts of the system.
 
-**Important constraint:**
-The team already has a fixed tool role: 'Calculator'. Do NOT define it as a new role. Design additional reasoning/analysis roles that answer the task directly, without any external document lookup.
+**Fixed tool roles:**
+
+The team already contains these fixed tool roles:
+
+- WebSearch: searches the web and returns URLs and snippets.
+- WebExtract: reads the contents of a selected URL.
+- Calculator: evaluates arithmetic expressions.
+
+Do NOT redefine these roles in the generated `roles` list. They may and should
+be referenced directly in the workflow.
+
+For factual research tasks, the workflow MUST contain:
+1. a reasoning step that determines what evidence is needed;
+2. at least one WebSearch step;
+3. at least one WebExtract step;
+4. a verification or evidence-assessment step;
+5. a final answer-synthesis step.
+
+Calculator must only appear when arithmetic is genuinely required.
+Never replace a WebSearch or WebExtract step with a prose description of what
+someone should search for.
 
 **Deliverables:**
 1. Define Each Role:
@@ -35,6 +54,9 @@ The team already has a fixed tool role: 'Calculator'. Do NOT define it as a new 
       * Define its input, which must come from previous roles' outputs or be empty.
       * Define its output, which will be used as input for subsequent steps.
    - Ensure there is a designated role at the end to integrate all components into the final deliverable.
+
+Every external factual claim used by the final synthesizer must come from
+actual outputs of WebSearch or WebExtract, not solely from model memory.
 
 Now, giving the following task:
 <task>

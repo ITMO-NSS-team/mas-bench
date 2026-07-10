@@ -34,6 +34,12 @@ Use these guidelines when generating the function:
 - MUST not make any assumptions in the code.
 - Ensure that every variable declared in the function is utilized, with no unused or redundant variables.
 - Ensure the created function complete and correct to avoid runtime failures.
+- Preserve every WebSearch and WebExtract step specified in the workflow.
+- Do not replace tool execution with an LLM-generated research plan.
+- WebSearch input must be a short search query, not a paragraph.
+- WebExtract input must contain an actual URL returned by WebSearch.
+- Calculator input must be a valid arithmetic expression and no prose.
+- The final role must return only the requested answer, not the research process.
 
 # Examples:
 Here is an examples to help you design the function:
@@ -77,27 +83,61 @@ def build_forward(llm, logger, roles, workflow):
 
 EXAMPLES = """
 Available Roles:
+{"Name": "Question Analyst", "Responsibility": "Identify the entities, ambiguity, and evidence required", "Policy": "Analyze the exact question and determine what must be verified."}
+{"Name": "Search Query Planner", "Responsibility": "Produce a concise search query", "Policy": "Return only one short search query."}
+{"Name": "Evidence Verifier", "Responsibility": "Check whether the evidence directly supports the answer", "Policy": "Check scope, dates, entities, and contradictions."}
+{"Name": "Answer Synthesizer", "Responsibility": "Return a concise final answer", "Policy": "Use only verified evidence and answer directly."}
+{"Name": "WebSearch", "Responsibility": "Search the web and return URLs and snippets", "Policy": "Executes tool automatically."}
+{"Name": "WebExtract", "Responsibility": "Extract the contents of a URL", "Policy": "Executes tool automatically."}
 {"Name": "Calculator", "Responsibility": "Evaluate mathematical expressions", "Policy": "Executes tool automatically."}
-{"Name": "Question Analyst", "Responsibility": "Break down the question and identify what facts or computations are needed", "Policy": "1. Read the question carefully. 2. Identify the key facts or reasoning steps needed. 3. Note any numerical data needed for calculations."}
-{"Name": "Answer Synthesizer", "Responsibility": "Synthesize the analysis into a concise final answer", "Policy": "1. Review the analysis. 2. Formulate a clear, direct answer. 3. Ensure the answer directly addresses the question."}
 
 Workflow:
 [
-  {"Step": 1, "Role": "Question Analyst", "Input": "", "Output": "key facts and analysis"},
-  {"Step": 2, "Role": "Calculator", "Input": "key facts and analysis", "Output": "computed values"},
-  {"Step": 3, "Role": "Answer Synthesizer", "Input": "key facts and analysis, computed values", "Output": "final answer"}
+  {"Step": 1, "Role": "Question Analyst", "Input": "", "Output": "required evidence and ambiguity analysis"},
+  {"Step": 2, "Role": "Search Query Planner", "Input": "required evidence and ambiguity analysis", "Output": "one short search query"},
+  {"Step": 3, "Role": "WebSearch", "Input": "one short search query", "Output": "search results with URLs"},
+  {"Step": 4, "Role": "WebExtract", "Input": "search results with URLs", "Output": "content of a relevant source"},
+  {"Step": 5, "Role": "Evidence Verifier", "Input": "required evidence and ambiguity analysis, search results with URLs, content of a relevant source", "Output": "verified answer and any caveats"},
+  {"Step": 6, "Role": "Answer Synthesizer", "Input": "verified answer and any caveats", "Output": "concise final answer"}
 ]
 
 Answer:
 '''def forward(team):
-    # Step 1: Question Analyst breaks down the question and identifies needed facts/computations.
-    analysis = team.call('Question Analyst', [], "key facts and analysis")
+    analysis = team.call(
+        "Question Analyst",
+        [],
+        "required evidence and ambiguity analysis",
+    )
 
-    # Step 2: Calculator evaluates any needed numerical expression.
-    computed = team.call('Calculator', [analysis], "computed values")
+    query = team.call(
+        "Search Query Planner",
+        [analysis],
+        "one short web search query and no other text",
+    )
 
-    # Step 3: Answer Synthesizer formulates the final answer.
-    answer = team.call('Answer Synthesizer', [analysis, computed], "final answer")
+    search_results = team.call(
+        "WebSearch",
+        [query],
+        "search results with URLs",
+    )
+
+    source_content = team.call(
+        "WebExtract",
+        [search_results],
+        "content of the most relevant source",
+    )
+
+    verification = team.call(
+        "Evidence Verifier",
+        [analysis, search_results, source_content],
+        "verified answer, checking scope and contradictions",
+    )
+
+    answer = team.call(
+        "Answer Synthesizer",
+        [verification],
+        "only the concise final answer",
+    )
 
     return answer
 '''

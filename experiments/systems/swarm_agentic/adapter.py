@@ -15,6 +15,7 @@ from benchlib.tracing.tracker import TokenTracker
 from .func import get_forward, set_forward
 from .logger import setup_logger
 from .role import Team
+from .tracking import TrackerCallback
 
 
 def _supports_temperature(model: str) -> bool:
@@ -45,12 +46,25 @@ class SwarmAgenticAdapter(AbstractAdapter):
         self._team_dict = None
         self._forward_code = None
 
-    def _make_llm(self, model: str | None = None) -> ChatOpenAI:
-        """Create a ChatOpenAI instance with env-based config."""
+    def _make_llm(
+        self,
+        model: str | None = None,
+        tracker: TokenTracker | None = None,
+    ) -> ChatOpenAI:
+        """Create a ChatOpenAI instance with optional usage tracking."""
         model = model or self._model
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, Any] = {
+            "max_retries": 2,
+        }
         if _supports_temperature(model):
             kwargs["temperature"] = 0.001
+        if tracker is not None:
+            kwargs["callbacks"] = [
+                TrackerCallback(
+                    tracker=tracker,
+                    default_model=model,
+                )
+            ]
         return ChatOpenAI(
             model=model,
             base_url=os.environ.get("OPENAI_BASE_URL"),
@@ -58,18 +72,21 @@ class SwarmAgenticAdapter(AbstractAdapter):
             **kwargs,
         )
 
-    def _init_team(self) -> None:
+    def _init_team(self, tracker: TokenTracker | None = None) -> None:
         """Generate team + forward code once via LLM (lazy)."""
         if self._initialized:
             return
 
         # The constructor stage (team roles + forward codegen) may run on a
         # stronger model than the worker roles, mirroring AutoMAS's meta stage.
-        llm_init = self._make_llm(self._meta_model)
+        llm_init = self._make_llm(
+            self._meta_model,
+            tracker=tracker,
+        )
         logger = setup_logger("init")
 
         # 1. Generate team (roles + workflow) from task description
-        team = Team(llm=llm_init, logger=logger, tracker=None)
+        team = Team(llm=llm_init, logger=logger, tracker=tracker)
         team.init(llm=llm_init)
         team.inject_tool_roles()
 
@@ -98,12 +115,6 @@ class SwarmAgenticAdapter(AbstractAdapter):
         question: str,
         gold_answer: str,
     ) -> tuple[str, QuestionLog]:
-        if self._generation_mode == "per_task":
-            self._initialized = False
-        self._init_team()
-        assert self._team_dict is not None
-        assert self._forward_code is not None
-
         tracker = TokenTracker(
             question_id=question_id,
             question=question,
@@ -111,7 +122,22 @@ class SwarmAgenticAdapter(AbstractAdapter):
         )
 
         try:
-            llm = self._make_llm()
+            if self._generation_mode == "per_task":
+                self._initialized = False
+                self._team_dict = None
+                self._forward_code = None
+
+            # On the first one-time question, setup usage is included here.
+            # Averaging over all questions amortizes the one-time setup cost.
+            self._init_team(tracker=tracker)
+
+            assert self._team_dict is not None
+            assert self._forward_code is not None
+
+            llm = self._make_llm(
+                self._model,
+                tracker=tracker,
+            )
 
             team = Team(llm=llm, logger=None, tracker=tracker)
             team.update(self._team_dict)
@@ -121,16 +147,8 @@ class SwarmAgenticAdapter(AbstractAdapter):
             team.reset_task(question)
             answer = func(team)
 
-            tracker.log_llm_call(
-                model=self._model,
-                prompt_tokens=0,
-                completion_tokens=0,
-                latency_ms=0,
-                function_calls=0,
-            )
-
-        except Exception as e:
-            tracker.set_error(str(e))
+        except Exception as exc:
+            tracker.set_error(f"{type(exc).__name__}: {exc}")
             answer = ""
 
         return answer, tracker.to_question_log(answer)
