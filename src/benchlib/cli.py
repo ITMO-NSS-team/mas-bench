@@ -51,6 +51,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model", default="openai/gpt-4o-mini", help="LLM model identifier."
     )
     parser.add_argument(
+        "--meta-model",
+        default=None,
+        help="Model for the MAS-constructing meta stage (AutoMAS pool/graph "
+        "generation, SwarmAgentic team/forward generation); workers keep "
+        "--model. Default: same as --model.",
+    )
+    parser.add_argument(
         "--systems",
         nargs="+",
         default=["automas"],
@@ -186,6 +193,8 @@ def _run_benchmark(
     adapter_kwargs = {}
     if args.generation_mode is not None:
         adapter_kwargs["generation_mode"] = args.generation_mode
+    if args.meta_model is not None:
+        adapter_kwargs["meta_model"] = args.meta_model
 
     all_results: list[SystemResults] = []
     summaries: list[dict] = []
@@ -238,6 +247,7 @@ def _run_benchmark(
     params = {
         "benchmark": spec.name,
         "model": args.model,
+        "meta_model": args.meta_model,
         "systems": args.systems,
         "sample_n": args.sample_n,
         "repeat": repeat,

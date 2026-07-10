@@ -1,0 +1,11 @@
+name = "seal_hard"
+description = """
+SealQA Seal-Hard (vtllms/sealqa): fact-seeking questions that are hard for
+search-augmented language models — search results are often conflicting or
+noisy (254 questions; GPT-4.1 with search scores ~20%). Superset-style
+companion to Seal-0 with more statistical power. No corpus is provided:
+systems must research answers with their own tools and return a short
+factual answer.
+"""
+split = "test"
+metrics = ["exact_match", "f1", "llm_accuracy"]

@@ -1,0 +1,10 @@
+name = "seal_0"
+description = """
+SealQA Seal-0 (vtllms/sealqa): fact-seeking questions on which web search
+yields conflicting, noisy, or unhelpful results — the hardest core subset
+(111 questions; frontier models score near 0% without search and ~17% with
+it). No corpus is provided: systems must research answers with their own
+tools and return a short factual answer.
+"""
+split = "test"
+metrics = ["exact_match", "f1", "llm_accuracy"]

@@ -84,7 +84,13 @@ class AutoMASAdapter(AbstractAdapter):
                 )
         model = _normalize_openrouter_model(self._model)
         os.environ.setdefault("AGENT_NODE_MODEL", model)
-        os.environ.setdefault("DEFAULT_META_MODEL", model)
+        if self._meta_model:
+            # Explicit --meta-model wins over .env; workers keep --model.
+            os.environ["DEFAULT_META_MODEL"] = _normalize_openrouter_model(
+                self._meta_model
+            )
+        else:
+            os.environ.setdefault("DEFAULT_META_MODEL", model)
 
     def _init_framework(self) -> None:
         # Env must be set before any AutoMAS import.

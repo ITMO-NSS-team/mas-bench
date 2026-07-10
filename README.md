@@ -5,9 +5,8 @@ questions directly (no retriever/corpus/index step), and only the systems that
 auto-generate their own multi-agent structure are kept: **AutoMAS** and
 **SwarmAgentic**.
 
-Tiny library `benchlib` is the **harness**: tracing, evaluation, CLI, and the
-adapter/benchmark contracts + discovery. The **content** it measures lives
-outside the package and is discovered by path:
+`benchlib` is the harness (tracing, evaluation, CLI, contracts + discovery);
+the content it measures is discovered by path:
 
 ```
 experiments/
@@ -15,42 +14,62 @@ experiments/
   benchmarks/<name>/    # a benchmark: manifest.toml + builder.py + questions.jsonl
 ```
 
-Add a system or benchmark by dropping in a folder — no library edits.
-`experiments/benchmarks/` is currently empty; non-RAG benchmarks (direct
-question -> answer, no corpus) are added separately.
+Bundled benchmarks: **seal_0** (111 q) and **seal_hard** (254 q) — subsets of
+[SealQA](https://huggingface.co/datasets/vtllms/sealqa), long-horizon search QA;
+**browsecomp** — deterministic 150-question subsample (seed 42) of
+[BrowseComp](https://github.com/openai/simple-evals/blob/main/browsecomp_eval.py),
+multi-step web-browsing QA.
 
 ### Setup
 
 ```bash
-uv sync                          # harness only
-uv sync --group swarm_agentic    # + SwarmAgentic content deps
-uv pip install -e automas-research/   # + AutoMAS (installs from vendored local source)
+# environment
+uv sync                               # harness only
+uv sync --group swarm_agentic         # + SwarmAgentic deps
+uv pip install -e automas-research/   # + AutoMAS (vendored local source)
+
+# SearXNG (shared web search backend for both systems; installs + starts in Docker,
+# then set SEARXNG_URL=http://localhost:18888 in .env)
+just searxng-start
+just searxng-check    # verify the JSON API responds
+
+# benchmark data (writes experiments/benchmarks/<name>/questions.jsonl)
+uv sync --group benchmarks    # datasets, only needed for the seal_* downloads
+just download seal_0
+just download seal_hard
+just download browsecomp      # decrypts locally; questions.jsonl is git-ignored, never commit it
 ```
 
-Set `OPENAI_API_KEY` / `OPENAI_BASE_URL` in `.env` (AutoMAS additionally needs
-`OPENROUTER_API_KEY`, or reuses `OPENAI_API_KEY` if `OPENAI_BASE_URL` already
-points at OpenRouter).
+`.env`: `OPENAI_API_KEY` / `OPENAI_BASE_URL` (AutoMAS also needs
+`OPENROUTER_API_KEY`, or reuses `OPENAI_API_KEY` if `OPENAI_BASE_URL` points at
+OpenRouter); `JUDGE_MODEL` overrides the fixed `llm_accuracy` judge (default
+`openai/gpt-4o-mini`).
 
-List what's available with `just available` (discovered benchmarks and systems).
+```bash
+# list discovered benchmarks and systems
+just available
+```
 
 ### Run
 
-Parameters are flags with defaults in `src/benchlib/cli.py` (`just run --help`).
-
 ```bash
-just run --benchmark <name> --systems automas swarm_agentic
-just run --benchmark <name> --systems automas --model openai/gpt-4o
-just run --benchmark <name> --systems automas swarm_agentic --repeats 5
+# all flags: just run --help
+
+# both systems on both SealQA subsets
+just run --benchmark seal_0 seal_hard --systems automas swarm_agentic
+
+# pick the worker model
+just run --benchmark seal_0 --systems automas --model openai/gpt-4o
+
+# mean ± std over repeats
+just run --benchmark seal_0 --systems automas swarm_agentic --repeats 5
+
+# split config: MAS construction on --meta-model, workers on --model
+# (cross-vendor ids require OPENAI_BASE_URL -> OpenRouter)
+just run --benchmark seal_0 seal_hard --systems automas swarm_agentic \
+    --meta-model anthropic/claude-sonnet-4 --model openai/gpt-5-mini
+
+# when the MAS is (re)generated: once per benchmark / fresh per question
+just run --benchmark seal_0 --systems automas --generation-mode one_time
+just run --benchmark seal_0 --systems automas --generation-mode per_task
 ```
-
-**Generation mode.** Both systems auto-generate their MAS and can do it once for
-the whole benchmark or fresh for every question, pick with `--generation-mode`:
-
-```bash
-just run --benchmark <name> --systems automas --generation-mode one_time  # generate once, reuse across the benchmark
-just run --benchmark <name> --systems automas --generation-mode per_task  # regenerate the MAS for each question
-```
-
-**Judge.** The `llm_accuracy` metric is scored by a fixed LLM judge
-(`openai/gpt-4o-mini` by default, independent of `--model`); override with
-`JUDGE_MODEL` in `.env`.

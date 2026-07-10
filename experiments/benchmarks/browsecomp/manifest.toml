@@ -1,0 +1,9 @@
+name = "browsecomp"
+description = """
+BrowseComp (OpenAI simple-evals): questions that require persistent,
+multi-step web browsing to locate hard-to-find, entangled facts; answers are
+short and verifiable. Deterministic 150-question subsample (seed 42) of the
+1,266-question test set. No corpus is provided: systems must research answers
+with their own tools and return a short factual answer.
+"""
+metrics = ["exact_match", "f1", "llm_accuracy"]

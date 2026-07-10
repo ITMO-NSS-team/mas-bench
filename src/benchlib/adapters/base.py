@@ -21,6 +21,9 @@ class AbstractAdapter(ABC):
     ) -> None:
         self._model = model
         self._generation_mode = kwargs.pop("generation_mode", None)
+        # Model for the MAS-constructing meta stage (pool/graph/team/forward
+        # generation); None means "same as the worker model".
+        self._meta_model: str | None = kwargs.pop("meta_model", None)
         self._config = kwargs
 
         # Benchmark context (set by runner before each benchmark)

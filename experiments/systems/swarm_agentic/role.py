@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, List
 
@@ -12,6 +13,7 @@ from langchain_core.prompts import PromptTemplate
 from benchlib.adapters.tools import do_calculate
 
 from .prompt.team_init import init_team
+from .web_tools import WEB_SEARCH_MAX_RESULTS, do_web_extract, do_web_search
 
 if TYPE_CHECKING:
     from benchlib.tracing.tracker import TokenTracker
@@ -74,6 +76,42 @@ def _tool_calculate(
     expression = others_outputs.strip() if others_outputs.strip() else task_instance
     with tracker.track_tool("calculate", expression, 0) as _results:
         result = do_calculate(expression)
+    return result
+
+
+_URL_RE = re.compile(r"https?://[^\s)\]>\"']+")
+
+
+def _tool_web_search(
+    task_instance: str,
+    others_outputs: str,
+    tracker: TokenTracker,
+) -> str:
+    query = others_outputs.strip() if others_outputs.strip() else task_instance
+    # Upstream roles may hand over prose instead of a query; keep it search-sized.
+    query = " ".join(query.split())[:300]
+    with tracker.track_tool("web_search", query, WEB_SEARCH_MAX_RESULTS) as results:
+        result = do_web_search(query)
+        results.append(result)
+    return result
+
+
+def _tool_web_extract(
+    task_instance: str,
+    others_outputs: str,
+    tracker: TokenTracker,
+) -> str:
+    source = others_outputs if others_outputs.strip() else task_instance
+    match = _URL_RE.search(source)
+    if not match:
+        return (
+            "No URL found in the input. Pass a message containing an "
+            "http(s):// link, e.g. one picked from WebSearch results."
+        )
+    url = match.group(0).rstrip(".,;")
+    with tracker.track_tool("web_extract", url, 0) as results:
+        result = do_web_extract(url)
+        results.append(result[:500])
     return result
 
 
@@ -225,6 +263,18 @@ _TOOL_ROLE_DEFS: list[tuple[str, str, Any]] = [
         "Calculator",
         "Evaluate mathematical expressions",
         _tool_calculate,
+    ),
+    (
+        "WebSearch",
+        "Search the web and return titles, URLs and snippets of the top "
+        "results. Input: a short search query (pass only the query text)",
+        _tool_web_search,
+    ),
+    (
+        "WebExtract",
+        "Fetch a web page and return its content as Markdown (supports HTML, "
+        "PDF). Input: a message containing the http(s) URL to fetch",
+        _tool_web_extract,
     ),
 ]
 

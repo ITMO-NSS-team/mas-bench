@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -14,6 +15,13 @@ from benchlib.tracing.tracker import TokenTracker
 from .func import get_forward, set_forward
 from .logger import setup_logger
 from .role import Team
+
+
+def _supports_temperature(model: str) -> bool:
+    """OpenAI reasoning models (gpt-5*, o1/o3/o4...) reject non-default
+    temperature; skip the param for them (ids may be OpenRouter-namespaced)."""
+    base = model.split("/")[-1]
+    return re.match(r"gpt-5|o\d", base) is None
 
 
 @register("swarm_agentic")
@@ -37,13 +45,17 @@ class SwarmAgenticAdapter(AbstractAdapter):
         self._team_dict = None
         self._forward_code = None
 
-    def _make_llm(self) -> ChatOpenAI:
+    def _make_llm(self, model: str | None = None) -> ChatOpenAI:
         """Create a ChatOpenAI instance with env-based config."""
+        model = model or self._model
+        kwargs: dict[str, Any] = {}
+        if _supports_temperature(model):
+            kwargs["temperature"] = 0.001
         return ChatOpenAI(
-            model=self._model,
-            temperature=0.001,
+            model=model,
             base_url=os.environ.get("OPENAI_BASE_URL"),
             api_key=os.environ.get("OPENAI_API_KEY"),
+            **kwargs,
         )
 
     def _init_team(self) -> None:
@@ -51,7 +63,9 @@ class SwarmAgenticAdapter(AbstractAdapter):
         if self._initialized:
             return
 
-        llm_init = self._make_llm()
+        # The constructor stage (team roles + forward codegen) may run on a
+        # stronger model than the worker roles, mirroring AutoMAS's meta stage.
+        llm_init = self._make_llm(self._meta_model)
         logger = setup_logger("init")
 
         # 1. Generate team (roles + workflow) from task description

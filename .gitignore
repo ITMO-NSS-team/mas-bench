@@ -21,6 +21,9 @@ wheels/
 !/experiments/benchmarks/*/manifest.toml
 !/experiments/benchmarks/*/builder.py
 !/experiments/benchmarks/*/questions.jsonl
+# BrowseComp ships encrypted to keep it out of training data — never commit
+# the decrypted questions (rebuild with `just download browsecomp`):
+/experiments/benchmarks/browsecomp/questions.jsonl
 
 uv.lock
 results/

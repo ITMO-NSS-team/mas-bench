@@ -26,7 +26,16 @@ bench = "benchlib.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8.4.0"]
-swarm_agentic = ["langchain-openai>=0.3.0", "langchain-core>=0.3.0"]
+# only needed to (re)build questions.jsonl via `just download <name>`:
+benchmarks = ["datasets>=3.0.0"]
+swarm_agentic = [
+    "langchain-openai>=0.3.0",
+    "langchain-core>=0.3.0",
+    # web tool-roles (parity with AutoMAS's MCP web toolset):
+    "httpx>=0.28.1",
+    "requests>=2.32.0",
+    "markitdown[all]>=0.1.3",  # same extra as automas-research pins
+]
 
 # automas installs from local source (its deps are heavy/optional, kept out of
 # this lockfile's default resolution):
