@@ -15,6 +15,12 @@ discover_adapters("experiments/systems")
 
 from _benchlib_systems.swarm_agentic.adapter import SwarmAgenticAdapter
 from _benchlib_systems.swarm_agentic.prompt.team_init import TeamPlanError, init_team
+from _benchlib_systems.swarm_agentic.prompt.write_forward import (
+    ForwardCodeError,
+    build_forward,
+    extract_forward_code,
+    validate_forward_code,
+)
 
 
 VALID_PLAN = {
@@ -80,6 +86,87 @@ def test_team_fails_after_three_invalid_responses():
     with pytest.raises(TeamPlanError, match="after 3 attempts"):
         init_team(llm, logger=None)
     assert len(llm.prompts) == 3
+
+
+FORWARD_ROLES = '''
+{"Name": "Researcher", "Responsibility": "research", "Policy": "research"}
+{"Name": "Answer Synthesizer", "Responsibility": "answer", "Policy": "answer"}
+{"Name": "WebSearch", "Responsibility": "search", "Policy": "tool"}
+{"Name": "WebExtract", "Responsibility": "extract", "Policy": "tool"}
+{"Name": "Calculator", "Responsibility": "calculate", "Policy": "tool"}
+'''
+VALID_FORWARD = '''def forward(team):
+    query = team.call("Researcher", [], "short query")
+    results = team.call("WebSearch", [query], "URLs")
+    source = team.call("WebExtract", [results], "source content")
+    answer = team.call("Answer Synthesizer", [source], "final answer")
+    return answer
+'''
+
+
+class PlainLLM:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.prompts = []
+
+    def invoke(self, prompt):
+        self.prompts.append(prompt)
+        return next(self.responses)
+
+
+def test_forward_extracts_fenced_python_with_explanation():
+    response = f"Here is the workflow:\n```python\n{VALID_FORWARD}```\nIt uses research."
+    assert extract_forward_code(response) == VALID_FORWARD.strip()
+
+
+def test_forward_retries_invalid_code():
+    llm = PlainLLM(["```python\ndef forward(team):\n    return 'no tools'\n```", f"```python\n{VALID_FORWARD}```"])
+    assert build_forward(llm, None, FORWARD_ROLES, []) == VALID_FORWARD.strip()
+    assert len(llm.prompts) == 2
+    assert "must call" in llm.prompts[1]
+
+
+def test_forward_rejects_missing_web_tools():
+    with pytest.raises(ForwardCodeError, match="WebExtract"):
+        validate_forward_code(
+            '''def forward(team):
+    result = team.call("WebSearch", [], "URLs")
+    return result
+''',
+            {"WebSearch", "WebExtract"},
+        )
+
+
+def test_forward_rejects_unknown_roles():
+    with pytest.raises(ForwardCodeError, match="unknown role"):
+        validate_forward_code(
+            '''def forward(team):
+    search = team.call("WebSearch", [], "URLs")
+    source = team.call("WebExtract", [search], "source")
+    return team.call("Invented", [source], "answer")
+''',
+            {"WebSearch", "WebExtract"},
+        )
+
+
+@pytest.mark.parametrize(
+    "calculator_call",
+    [
+        'team.call("Calculator", ["1 + 2"], "result")',
+        'team.call("Calculator", ["please calculate 1 + 2"], "result")',
+    ],
+)
+def test_forward_rejects_calculator_misuse(calculator_call):
+    with pytest.raises(ForwardCodeError, match="Calculator"):
+        validate_forward_code(
+            f'''def forward(team):
+    search = team.call("WebSearch", [], "URLs")
+    source = team.call("WebExtract", [search], "source")
+    result = {calculator_call}
+    return source
+''',
+            {"WebSearch", "WebExtract", "Calculator"},
+        )
 
 
 class DummyAdapter(AbstractAdapter):
