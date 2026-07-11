@@ -28,6 +28,13 @@ def run_system_on_benchmark(
     )
     question_logs: list[QuestionLog] = []
 
+    # One-time systems must either be ready before execution starts or fail the
+    # whole system run. This avoids retrying a broken constructor for every
+    # question and prevents partial, misleading result files.
+    initialize = getattr(adapter, "initialize", None)
+    if callable(initialize):
+        initialize()
+
     for q in tqdm(questions, desc=f"{adapter.name}/{benchmark_name}"):
         try:
             question_text = q.get("question", "")
@@ -37,6 +44,11 @@ def run_system_on_benchmark(
                 question=question_text,
                 gold_answer=gold_answer,
             )
+
+            if log.error:
+                question_logs.append(log)
+                results.failed_questions += 1
+                continue
 
             judge_usage: dict[str, int] = {"prompt": 0, "completion": 0}
             ctx = EvalContext(
@@ -59,8 +71,6 @@ def run_system_on_benchmark(
             log.judge_prompt_tokens = judge_usage["prompt"]
             log.judge_completion_tokens = judge_usage["completion"]
             question_logs.append(log)
-            if log.error:
-                results.failed_questions += 1
 
         except Exception as e:
             q_id = q.get("id", "unknown") if isinstance(q, dict) else "unknown"

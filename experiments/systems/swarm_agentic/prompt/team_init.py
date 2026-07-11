@@ -1,8 +1,8 @@
 """Team initialization prompt — generates roles and workflow via LLM."""
 
-import re
+from typing import Any
 
-from langchain_core.prompts import PromptTemplate
+from pydantic import BaseModel
 
 from ..logger import log
 from .base import TASK_MINI
@@ -66,81 +66,109 @@ Now, giving the following task:
 Please design a detailed multi-agent collaborative team that could efficiently solve the <task>.
 """
 
-schema = {
-    "title": "Plan",
-    "description": "Plan a team to solve the task.",
-    "type": "object",
-    "properties": {
-        "roles": {
-            "type": "array",
-            "description": "Details of the needed roles",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "Name": {
-                        "type": "string",
-                        "description": "A clear name that reflects its specific responsibility.",
-                    },
-                    "Responsibility": {
-                        "type": "string",
-                        "description": "Specific tasks or functions the role will handle.",
-                    },
-                    "Policy": {
-                        "type": "string",
-                        "description": "Operational guidelines for fulfilling the role's duties. Provide step-by-step instructions in a numbered list format (1., 2., 3., etc.) for how the role can achieve their goal.",
-                    },
-                },
-                "required": ["Name", "Responsibility", "Policy"],
-            },
-        },
-        "workflow": {
-            "type": "array",
-            "description": "A detailed workflow on how to solve the task with the roles.",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "Step": {
-                        "type": "string",
-                        "description": "The sequence number of the step in the process.",
-                    },
-                    "Role": {
-                        "type": "string",
-                        "description": "The role responsible for acting in this step.",
-                    },
-                    "Input": {
-                        "type": "string",
-                        "description": "The input for this step must be the output produced by one or more roles in previous steps. If this step does not have an upstream dependency, the input should be defined as empty.",
-                    },
-                    "Output": {
-                        "type": "string",
-                        "description": "The output must be structured and usable as a direct input for subsequent steps.",
-                    },
-                },
-                "required": ["Step", "Role", "Input", "Output"],
-            },
-        },
-    },
-    "required": ["roles", "workflow"],
-}
+class RoleSpec(BaseModel):
+    Name: str
+    Responsibility: str
+    Policy: str
+
+
+class WorkflowStep(BaseModel):
+    Step: str
+    Role: str
+    Input: str
+    Output: str
+
+
+class TeamPlan(BaseModel):
+    roles: list[RoleSpec]
+    workflow: list[WorkflowStep]
+
+
+class TeamPlanError(ValueError):
+    """A generated team plan could not be parsed or is unsafe to execute."""
+
+
+_FIXED_ROLES = {"WebSearch", "WebExtract", "Calculator"}
+_REASONING_TERMS = ("reason", "analy", "evidence", "verify", "research")
+_SYNTHESIS_TERMS = ("synth", "final", "answer")
+
+
+def _raw_response(raw: Any) -> str:
+    content = getattr(raw, "content", raw)
+    return str(content)[:12_000]
+
+
+def _validate_plan(plan: TeamPlan) -> None:
+    generated_names = {role.Name for role in plan.roles}
+    if not generated_names:
+        raise TeamPlanError("plan has no generated roles")
+    if generated_names & _FIXED_ROLES:
+        raise TeamPlanError("generated roles must not redefine fixed tool roles")
+
+    role_text = [
+        " ".join((role.Name, role.Responsibility, role.Policy)).lower()
+        for role in plan.roles
+    ]
+    if not any(any(term in text for term in _REASONING_TERMS) for text in role_text):
+        raise TeamPlanError("plan has no reasoning role")
+
+    workflow_roles = [step.Role for step in plan.workflow]
+    unknown_roles = set(workflow_roles) - generated_names - _FIXED_ROLES
+    if unknown_roles:
+        raise TeamPlanError(
+            f"workflow references unknown roles: {', '.join(sorted(unknown_roles))}"
+        )
+    for tool in ("WebSearch", "WebExtract"):
+        if tool not in workflow_roles:
+            raise TeamPlanError(f"workflow is missing required {tool} step")
+
+    final_roles = {
+        role.Name
+        for role, text in zip(plan.roles, role_text)
+        if any(term in text for term in _SYNTHESIS_TERMS)
+    }
+    if not final_roles:
+        raise TeamPlanError("plan has no final synthesis role")
+    if not workflow_roles or workflow_roles[-1] not in final_roles:
+        raise TeamPlanError("the final workflow step must be a final synthesis role")
 
 
 def init_team(llm, logger):
     """Generate team structure (roles + workflow) via LLM with structured output."""
-    prompt = PromptTemplate(
-        input_variables=["task"],
-        template=INIT_TEAM_TEMPLATE,
+    prompt = INIT_TEAM_TEMPLATE.format(task=TASK_MINI)
+    structured_llm = llm.with_structured_output(
+        TeamPlan,
+        method="function_calling",
+        include_raw=True,
     )
+    last_error = "unknown error"
+    raw_response = ""
 
-    chain = prompt | llm.with_structured_output(schema)
-    input_vars = {"task": TASK_MINI}
-    res = chain.invoke(input_vars)
+    for attempt in range(3):
+        attempt_prompt = prompt if attempt == 0 else (
+            f"{prompt}\n\nYour previous response was invalid. Return the required "
+            "function-call structured TeamPlan, not Markdown.\n"
+            f"Parser or validation error: {last_error}\n"
+            f"Previous raw response:\n{raw_response}"
+        )
+        try:
+            result = structured_llm.invoke(attempt_prompt)
+            raw_response = _raw_response(result.get("raw"))
+            parsed = result.get("parsed")
+            if parsed is None:
+                raise TeamPlanError(str(result.get("parsing_error") or "no parsed plan"))
+            if not isinstance(parsed, TeamPlan):
+                parsed = TeamPlan.model_validate(parsed)
+            _validate_plan(parsed)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            continue
 
-    try:
-        lines = re.split(r"(\d+\.\s)", res["workflow"])
-        lines = [lines[i] + lines[i + 1].strip() for i in range(1, len(lines), 2)]
-        res["workflow"] = "\n".join(lines)
-    except Exception:
-        pass
+        res = parsed.model_dump()
+        log(logger, "Init Team", attempt_prompt, res)
+        return res
 
-    log(logger, "Init Team", prompt.format(**input_vars), res)
-    return res
+    raise TeamPlanError(
+        f"team initialization failed after 3 attempts: {last_error}; "
+        f"last raw response: {raw_response}"
+    )

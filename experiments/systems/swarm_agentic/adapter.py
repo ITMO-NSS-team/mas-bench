@@ -40,11 +40,13 @@ class SwarmAgenticAdapter(AbstractAdapter):
         self._team_dict: dict[str, Any] | None = None
         self._forward_code: str | None = None
         self._initialized = False
+        self._initialization_error: Exception | None = None
 
     def _on_benchmark_change(self) -> None:
         self._initialized = False
         self._team_dict = None
         self._forward_code = None
+        self._initialization_error = None
 
     def _make_llm(
         self,
@@ -76,29 +78,40 @@ class SwarmAgenticAdapter(AbstractAdapter):
         """Generate team + forward code once via LLM (lazy)."""
         if self._initialized:
             return
+        if self._initialization_error is not None:
+            raise self._initialization_error
 
-        # The constructor stage (team roles + forward codegen) may run on a
-        # stronger model than the worker roles, mirroring AutoMAS's meta stage.
-        llm_init = self._make_llm(
-            self._meta_model,
-            tracker=tracker,
-        )
-        logger = setup_logger("init")
+        try:
+            # The constructor stage (team roles + forward codegen) may run on a
+            # stronger model than the worker roles, mirroring AutoMAS's meta stage.
+            llm_init = self._make_llm(
+                self._meta_model,
+                tracker=tracker,
+            )
+            logger = setup_logger("init")
 
-        # 1. Generate team (roles + workflow) from task description
-        team = Team(llm=llm_init, logger=logger, tracker=tracker)
-        team.init(llm=llm_init)
-        team.inject_tool_roles()
+            # 1. Generate team (roles + workflow) from task description
+            team = Team(llm=llm_init, logger=logger, tracker=tracker)
+            team.init(llm=llm_init)
+            team.inject_tool_roles()
 
-        # 2. Generate forward code
-        self._forward_code = get_forward(
-            llm_init,
-            logger,
-            team.to_str(),
-            team.workflow,
-        )
-        self._team_dict = team.save_into_dict()
-        self._initialized = True
+            # 2. Generate forward code
+            self._forward_code = get_forward(
+                llm_init,
+                logger,
+                team.to_str(),
+                team.workflow,
+            )
+            self._team_dict = team.save_into_dict()
+            self._initialized = True
+        except Exception as exc:
+            self._initialization_error = exc
+            raise
+
+    def initialize(self) -> None:
+        """Initialize a one-time team before benchmark execution begins."""
+        if self._generation_mode == "one_time":
+            self._init_team()
 
     @property
     def name(self) -> str:
@@ -126,9 +139,10 @@ class SwarmAgenticAdapter(AbstractAdapter):
                 self._initialized = False
                 self._team_dict = None
                 self._forward_code = None
+                self._initialization_error = None
 
-            # On the first one-time question, setup usage is included here.
-            # Averaging over all questions amortizes the one-time setup cost.
+            # ``initialize`` prepares one-time teams before the benchmark loop;
+            # this remains a no-op guard for callers that execute directly.
             self._init_team(tracker=tracker)
 
             assert self._team_dict is not None
