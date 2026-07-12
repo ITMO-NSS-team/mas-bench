@@ -35,6 +35,18 @@ when two independent sources agree. Keep all working context below
 """
 
 
+class ExecutionBudget:
+    """Per-task runtime budget consumed by each underlying model request."""
+
+    def __init__(self, requests: int = MAX_LLM_REQUESTS) -> None:
+        self.remaining_requests = requests
+
+    def consume_request(self) -> None:
+        if self.remaining_requests <= 0:
+            raise RuntimeError("AutoMAS LLM request budget exhausted")
+        self.remaining_requests -= 1
+
+
 @register("automas")
 class AutoMASAdapter(AbstractAdapter):
     """AutoMAS adapter — auto-generates a multi-agent pipeline per question (or
@@ -342,6 +354,23 @@ class AutoMASAdapter(AbstractAdapter):
         pipeline = builder.create_from_pool(
             pool, {k: list(v) for k, v in graph.items()}
         ).build()
+        budget = ExecutionBudget()
+        for node in pipeline.execution_order:
+            build_agent = node.build_agent
+
+            def budgeted_build_agent(build_agent=build_agent):
+                agent = build_agent()
+                model = agent.model
+                request = model.request
+
+                async def budgeted_request(*args: Any, **kwargs: Any):
+                    budget.consume_request()
+                    return await request(*args, **kwargs)
+
+                model.request = budgeted_request  # type: ignore[method-assign]
+                return agent
+
+            node.build_agent = budgeted_build_agent
         original_input = pipeline.node_session.get_input_for_node
         pipeline.node_session.get_input_for_node = lambda node: self._bounded_text(  # type: ignore[method-assign]
             original_input(node)

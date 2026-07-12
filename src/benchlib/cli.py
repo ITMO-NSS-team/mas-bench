@@ -225,7 +225,7 @@ def _run_benchmark(
 
         logger.success(
             f"Results for {system_name}/{spec.name}",
-            **{k: round(v, 3) for k, v in results.avg_metrics.items()},
+            **{k: round(v, 3) for k, v in results.avg_metrics_all_tasks.items()},
             tokens_per_q=round(results.avg_tokens_per_question),
             prompt_tokens_per_q=round(results.avg_prompt_tokens_per_question),
             completion_tokens_per_q=round(results.avg_completion_tokens_per_question),
@@ -237,7 +237,8 @@ def _run_benchmark(
         summaries.append(
             {
                 "system": results.system_name,
-                "metrics": results.avg_metrics,
+                "metrics": results.avg_metrics_all_tasks,
+                "successful_task_metrics": results.avg_metrics_successful_tasks,
                 "avg_tokens": results.avg_tokens_per_question,
                 "failed": results.failed_questions,
                 "total": results.total_questions,

@@ -14,7 +14,7 @@ from benchlib.adapters.tools import do_calculate
 from benchlib.answers import FINAL_ANSWER_INSTRUCTION
 
 from .prompt.team_init import init_team
-from .web_tools import WEB_SEARCH_MAX_RESULTS, do_web_extract, do_web_search
+from .web_tools import WEB_SEARCH_MAX_RESULTS, do_web_extract, do_web_search, valid_extraction
 
 if TYPE_CHECKING:
     from benchlib.tracing.tracker import TokenTracker
@@ -127,8 +127,8 @@ def _search_candidates(source: str, task: str) -> list[str]:
 
 def _bad_or_irrelevant_extraction(content: str, task: str) -> bool:
     lowered = content.lower()
-    if (
-        len(content.strip()) < _MIN_EXTRACT_CHARS
+    if (not valid_extraction(content)
+        or len(content.strip()) < _MIN_EXTRACT_CHARS
         or "403" in lowered
         or "404" in lowered
         or "content extraction failed" in lowered
@@ -155,8 +155,14 @@ def _tool_web_search(
         setattr(tracker, "_swarm_seen_queries", seen_queries)
     try:
         query = validate_search_query(query, seen_queries)
-    except ValueError as exc:
-        return f"Invalid search query: {exc}. Return only a concise factual search query."
+    except ValueError:
+        # Do not pass validation prose downstream. One deterministic repair is
+        # enough for benchmark execution; it cannot ask the user for help.
+        query = " ".join(re.findall(r"[A-Za-z0-9]+", task_instance)[:12])
+        try:
+            query = validate_search_query(query, seen_queries)
+        except ValueError:
+            query = " ".join(re.findall(r"[A-Za-z0-9]+", task_instance)[:8])
     with tracker.track_tool("web_search", query, WEB_SEARCH_MAX_RESULTS) as results:
         result = do_web_search(query)
         results.append(result)
@@ -202,6 +208,7 @@ class Role:
         self.responsibility: str = role["Responsibility"]
         self.policy: str = role["Policy"]
         self.llm = llm
+        self.is_final = False
         self.message = Message(
             role=role["Name"],
             subtask=role["Responsibility"],
@@ -248,16 +255,17 @@ class Role:
             template=ROLE_PROMPT,
         )
         chain = prompt | self.llm | StrOutputParser()
-        final_role = any(
-            marker in self.name.lower() for marker in ("final", "synth", "answer")
-        )
+        final_role = self.is_final
         input_vars = {
             "name": self.name,
             "responsibility": self.responsibility,
             "policy": self.policy,
             "instance": task_instance,
             "information": others_outputs,
-            "output": f"{output}\n\n{FINAL_ANSWER_INSTRUCTION}" if final_role else output,
+            "output": (
+                f"{output}\n\n{FINAL_ANSWER_INSTRUCTION}\nDo not think step by step."
+                if final_role else output
+            ),
         }
         response = chain.invoke(input_vars)
 
@@ -384,6 +392,12 @@ class Team:
         res = init_team(llm, self.logger)
         self.roles = [Role(role=r, llm=self.llm) for r in res["roles"]]
         self.workflow = res["workflow"]
+        self._mark_final_role()
+
+    def _mark_final_role(self) -> None:
+        final_name = self.workflow[-1]["Role"] if self.workflow else ""
+        for role in self.roles:
+            role.is_final = role.name == final_name
 
     def inject_tool_roles(self) -> None:
         """Ensure fixed tool roles are present in the team."""
@@ -428,6 +442,7 @@ class Team:
         """Update team from a saved dict (roles + workflow)."""
         self.roles = [Role(role=r, llm=self.llm) for r in new_team["roles"]]
         self.workflow = new_team["workflow"]
+        self._mark_final_role()
         self.task = None
         self.logs = []
         self.message_pool = None

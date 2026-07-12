@@ -53,6 +53,21 @@ def _truncate_text(text: str, max_lines: int | None) -> str:
     return text
 
 
+def valid_extraction(content: str) -> bool:
+    """Reject error pages and corrupt/binary text before it enters the cache."""
+    stripped = content.strip()
+    lowered = stripped.lower()
+    if len(stripped) < 200 or any(
+        marker in lowered
+        for marker in ("403", "404", "access denied", "not found", "content extraction failed")
+    ):
+        return False
+    if stripped.startswith(("%PDF", "PK\x03\x04", "\x89PNG")):
+        return False
+    printable = sum(char.isprintable() or char in "\n\r\t" for char in stripped)
+    return stripped.count("�") / len(stripped) < 0.01 and printable / len(stripped) > 0.9
+
+
 def do_web_search(query: str, max_results: int = WEB_SEARCH_MAX_RESULTS) -> str:
     """Search the web via the shared SearXNG instance; return results as text.
 
@@ -128,7 +143,8 @@ def do_web_extract(url: str, max_lines: int | None = EXTRACT_MAX_LINES) -> str:
         md = MarkItDown(requests_session=session)
         result = md.convert(url)
         content = _truncate_text(result.text_content, max_lines)
-        _EXTRACT_CACHE[url] = content
+        if valid_extraction(content):
+            _EXTRACT_CACHE[url] = content
         return content
     except Exception as e:
         return f"Content extraction failed: {e}"

@@ -15,6 +15,7 @@ discover_adapters("experiments/systems")
 
 from _benchlib_systems.automas.adapter import (
     AutoMASAdapter,
+    ExecutionBudget,
     FINAL_ANSWER_INSTRUCTION,
     MAX_CONTEXT_CHARS,
 )
@@ -73,3 +74,10 @@ def test_only_terminal_automas_agent_gets_final_answer_instruction():
     assert FINAL_ANSWER_INSTRUCTION not in limited[0].instructions
     assert FINAL_ANSWER_INSTRUCTION in limited[-1].instructions
     assert graph == {"Research": ["Final"], "Final": []}
+
+
+def test_runtime_request_budget_is_enforced():
+    budget = ExecutionBudget(requests=1)
+    budget.consume_request()
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        budget.consume_request()

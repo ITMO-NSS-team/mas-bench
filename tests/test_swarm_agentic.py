@@ -26,6 +26,7 @@ from _benchlib_systems.swarm_agentic.role import (
     _tool_web_extract,
     validate_search_query,
 )
+from _benchlib_systems.swarm_agentic.web_tools import valid_extraction
 from benchlib.tracing.tracker import TokenTracker
 
 
@@ -203,6 +204,26 @@ def test_web_extract_selects_ranked_url_and_falls_back(monkeypatch):
     monkeypatch.setattr("_benchlib_systems.swarm_agentic.role.do_web_extract", fake_extract)
     assert "Shakespeare" in _tool_web_extract("Who wrote Hamlet?", source, tracker)
     assert calls == ["https://bad.example", "https://good.example"]
+
+
+def test_corrupted_extraction_is_rejected_before_caching():
+    assert not valid_extraction("�" * 300)
+    assert not valid_extraction("\x01" * 300)
+
+
+def test_final_role_is_selected_from_workflow_not_name():
+    from _benchlib_systems.swarm_agentic.role import Team
+
+    team = Team(llm=object(), logger=None, tracker=None)
+    team.update({
+        "roles": [
+            {"Name": "Researcher", "Responsibility": "r", "Policy": "p"},
+            {"Name": "Merlin", "Responsibility": "r", "Policy": "p"},
+        ],
+        "workflow": [{"Step": "1", "Role": "Researcher", "Input": "", "Output": "x"}, {"Step": "2", "Role": "Merlin", "Input": "x", "Output": "a"}],
+    })
+    assert not team.roles[0].is_final
+    assert team.roles[1].is_final
 
 
 class DummyAdapter(AbstractAdapter):
