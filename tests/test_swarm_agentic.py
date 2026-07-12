@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -187,9 +188,10 @@ def test_search_query_validation_rejects_prose_prefixes_and_duplicates():
 
 def test_web_extract_selects_ranked_url_and_falls_back(monkeypatch):
     tracker = TokenTracker("q", "Who wrote Hamlet?", "William Shakespeare")
-    source = """1. Hamlet authorship\n   https://bad.example\n   Shakespeare wrote Hamlet
-2. Hamlet authorship\n   https://good.example\n   Shakespeare wrote Hamlet
-"""
+    source = json.dumps({"results": [
+        {"title": "Hamlet authorship", "url": "https://bad.example", "snippet": "Shakespeare wrote Hamlet"},
+        {"title": "Hamlet authorship", "url": "https://good.example", "snippet": "Shakespeare wrote Hamlet"},
+    ]})
     calls = []
 
     def fake_extract(url):

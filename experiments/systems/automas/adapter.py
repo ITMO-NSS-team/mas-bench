@@ -186,6 +186,7 @@ class AutoMASAdapter(AbstractAdapter):
             for marker in (
                 "429", "rate limit", "request limit", "too many requests",
                 "context length", "context window", "maximum context",
+                "finish_reason=\"error\"", "finish_reason='error'",
             )
         )
 
@@ -194,12 +195,14 @@ class AutoMASAdapter(AbstractAdapter):
         tracker: TokenTracker,
         pipeline: Any,
         node_latencies_ms: dict[str, float],
-    ) -> None:
+    ) -> tuple[bool, list[str]]:
         """Record actual AutoMAS node and MCP calls instead of one aggregate call."""
         trace = getattr(pipeline, "trace", None)
         node_traces = list(getattr(trace, "node_traces", []) or [])
         seen_queries: set[str] = set()
         searches = extractions = 0
+        pending_tools: dict[str, dict[str, Any]] = {}
+        evidence: list[str] = []
         for node_trace in node_traces:
             usage = getattr(node_trace, "usage", None)
             tracker.log_llm_call(
@@ -210,26 +213,85 @@ class AutoMASAdapter(AbstractAdapter):
             )
             for message in getattr(node_trace, "message_history", []) or []:
                 for part in getattr(message, "parts", []) or []:
-                    tool_name = getattr(part, "tool_name", None)
-                    if not tool_name:
-                        continue
-                    args = getattr(part, "args", "")
-                    query = self._bounded_text(args)
-                    lower_name = str(tool_name).lower()
-                    if "search" in lower_name:
-                        searches += 1
-                        normalized = query.casefold()
-                        if normalized in seen_queries:
-                            raise RuntimeError("AutoMAS repeated a web search query")
-                        seen_queries.add(normalized)
-                    if "extract" in lower_name:
-                        extractions += 1
-                    tracker.log_tool_call(str(tool_name), query, 0, [], 0.0)
-        if searches > MAX_SEARCHES or extractions > MAX_EXTRACTIONS:
-            raise RuntimeError(
-                f"AutoMAS research limit exceeded: searches={searches}/{MAX_SEARCHES}, "
-                f"extractions={extractions}/{MAX_EXTRACTIONS}"
-            )
+                    kind = type(part).__name__.lower()
+                    call_id = str(getattr(part, "tool_call_id", "") or "")
+                    if (
+                        ("toolcall" in kind or "toolreturn" not in kind)
+                        and getattr(part, "tool_name", None)
+                    ):
+                        pending_tools[call_id or f"call-{len(pending_tools)}"] = {
+                            "name": str(part.tool_name),
+                            "args": getattr(part, "args", ""),
+                            "result": [],
+                        }
+                    elif "toolreturn" in kind:
+                        call = pending_tools.get(call_id)
+                        if call is not None:
+                            content = str(getattr(part, "content", ""))
+                            call["result"].append(content)
+                            if content:
+                                evidence.append(content)
+
+        limited = False
+        for call in pending_tools.values():
+            name = call["name"]
+            args = self._tool_args(call["args"])
+            lower_name = name.lower()
+            query = ""
+            if "search" in lower_name:
+                query = self._normalize_query(args.get("query"))
+                if not query:
+                    continue
+                searches += 1
+                if query in seen_queries:
+                    limited = True
+                    continue
+                seen_queries.add(query)
+            elif "extract" in lower_name:
+                query = str(args.get("url", "")).strip()
+                extractions += 1
+            else:
+                query = self._bounded_text(args)
+            if searches > MAX_SEARCHES or extractions > MAX_EXTRACTIONS:
+                limited = True
+                continue
+            tracker.log_tool_call(name, query, 0, call["result"], 0.0)
+        return limited, evidence
+
+    @staticmethod
+    def _tool_args(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        raw = getattr(value, "args_json", value)
+        if isinstance(raw, str):
+            try:
+                decoded = json.loads(raw)
+                return decoded if isinstance(decoded, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    @staticmethod
+    def _normalize_query(value: Any) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    @staticmethod
+    def _unwrap_exception(exc: BaseException) -> BaseException:
+        if isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+            return AutoMASAdapter._unwrap_exception(exc.exceptions[0])
+        return exc
+
+    @staticmethod
+    def _fallback_answer(result: Any, evidence: list[str]) -> str:
+        for value in (result, *reversed(evidence)):
+            try:
+                return parse_answer_tag(AutoMASAdapter._extract_answer(value))
+            except ValueError:
+                continue
+        # Keep a bounded evidence-only fallback rather than creating an empty
+        # prediction when research was stopped by a limit.
+        text = " ".join(evidence).strip()
+        return text[:1000] if text else ""
 
     def _save_trace(self, question_id: str, pool: Any, graph: Any) -> None:
         """Dump the generated agent tree (pool + adjacency graph) to logs/automas/.
@@ -313,16 +375,36 @@ class AutoMASAdapter(AbstractAdapter):
         )
 
         try:
-            result, pipeline, node_latencies_ms = asyncio.run(
-                self._execute_async(question, question_id)
-            )
-            self._record_pipeline_trace(tracker, pipeline, node_latencies_ms)
-            answer = parse_answer_tag(self._extract_answer(result))
+            last_error: Exception | None = None
+            for _attempt in range(2):
+                try:
+                    result, pipeline, node_latencies_ms = asyncio.run(
+                        self._execute_async(question, question_id)
+                    )
+                    limited, evidence = self._record_pipeline_trace(
+                        tracker, pipeline, node_latencies_ms
+                    )
+                    answer = self._fallback_answer(result, evidence) if limited else parse_answer_tag(self._extract_answer(result))
+                    if not answer:
+                        raise RuntimeError("AutoMAS produced no final answer")
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if not self._is_limit_error(exc):
+                        raise
+            else:
+                raise last_error or RuntimeError("AutoMAS execution failed")
 
         except Exception as e:
-            message = str(e)
-            if self._is_limit_error(e):
-                message = f"OpenRouter request/context limit: {message}"
+            inner = self._unwrap_exception(e)
+            message = str(inner)
+            if self._is_limit_error(inner):
+                prefix = (
+                    "OpenRouter request/context limit"
+                    if any(marker in message.lower() for marker in ("429", "limit", "context"))
+                    else "OpenRouter transient model failure"
+                )
+                message = f"{prefix}: {message}"
             tracker.set_error(message)
             answer = ""
 

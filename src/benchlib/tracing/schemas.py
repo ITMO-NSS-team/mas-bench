@@ -87,6 +87,14 @@ class SystemResults(BaseModel):
     avg_metrics: dict[str, float] = Field(
         default_factory=dict, description="Average score per metric by name"
     )
+    avg_metrics_all_tasks: dict[str, float] = Field(
+        default_factory=dict,
+        description="Metrics with execution failures counted as zero",
+    )
+    avg_metrics_successful_tasks: dict[str, float] = Field(
+        default_factory=dict,
+        description="Metrics over successfully executed questions only",
+    )
 
     avg_tokens_per_question: float = Field(
         default=0.0, description="Average total tokens per question"

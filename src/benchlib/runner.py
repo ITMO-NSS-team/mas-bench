@@ -100,7 +100,14 @@ def _aggregate(results: SystemResults, metrics: tuple[str, ...]) -> None:
     for name in metrics:
         scores = [L.metrics[name] for L in logs if name in L.metrics]
         if scores:
-            results.avg_metrics[name] = sum(scores) / len(scores)
+            successful = sum(scores) / len(scores)
+            results.avg_metrics[name] = successful
+            results.avg_metrics_successful_tasks[name] = successful
+            # Failed executions contribute zero, while successful questions for
+            # which a metric is inapplicable remain excluded from that metric.
+            results.avg_metrics_all_tasks[name] = sum(scores) / (
+                results.total_questions or len(logs)
+            )
 
     n = len(logs)
     results.avg_tokens_per_question = sum(L.total_tokens for L in logs) / n

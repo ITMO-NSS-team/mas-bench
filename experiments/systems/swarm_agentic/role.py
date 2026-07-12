@@ -80,11 +80,6 @@ def _tool_calculate(
     return result
 
 
-_URL_RE = re.compile(r"https?://[^\s)\]>\"']+")
-_RESULT_RE = re.compile(
-    r"^\d+\.\s*(?P<title>.*?)\n\s*(?P<url>https?://\S+)\n\s*(?P<snippet>.*?)(?=\n\d+\.\s|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
 _INVALID_QUERY_PREFIX = re.compile(r"^(step|goal|breakdown)\b", re.IGNORECASE)
 _MAX_QUERY_CHARS = 160
 _MIN_EXTRACT_CHARS = 200
@@ -106,15 +101,22 @@ def validate_search_query(query: str, seen_queries: set[str] | None = None) -> s
 
 
 def _search_candidates(source: str, task: str) -> list[str]:
-    """Rank URLs from result titles/snippets; never default to the first URL."""
+    """Rank only URLs explicitly returned by the structured search tool."""
     terms = {word.lower() for word in re.findall(r"[A-Za-z0-9]{3,}", task)}
     ranked: list[tuple[int, int, str]] = []
-    for index, match in enumerate(_RESULT_RE.finditer(source)):
-        url = match.group("url").rstrip(".,;")
-        text = f"{match.group('title')} {match.group('snippet')}".lower()
+    try:
+        search = json.loads(source)
+        results = search.get("results", [])
+    except (TypeError, json.JSONDecodeError):
+        return []
+    for index, result in enumerate(results):
+        if not isinstance(result, dict):
+            continue
+        url = result.get("url")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            continue
+        text = f"{result.get('title', '')} {result.get('snippet', '')}".lower()
         ranked.append((sum(term in text for term in terms), index, url))
-    if not ranked:
-        ranked = [(0, index, url.rstrip(".,;")) for index, url in enumerate(_URL_RE.findall(source))]
     # Stable score sorting retains provider rank only as a tiebreaker.
     return list(
         dict.fromkeys(
@@ -128,9 +130,13 @@ def _bad_or_irrelevant_extraction(content: str, task: str) -> bool:
     if (
         len(content.strip()) < _MIN_EXTRACT_CHARS
         or "403" in lowered
+        or "404" in lowered
         or "content extraction failed" in lowered
         or "access denied" in lowered
+        or "not found" in lowered
+        or "web_extract unavailable" in lowered
         or "\x00" in content
+        or content.startswith(("%PDF", "PK\x03\x04", "\x89PNG"))
     ):
         return True
     terms = {word.lower() for word in re.findall(r"[A-Za-z0-9]{5,}", task)}

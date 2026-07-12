@@ -11,6 +11,8 @@ mirror the change here.
 from __future__ import annotations
 
 import os
+import json
+import time
 
 import httpx
 
@@ -22,7 +24,6 @@ _EXTRACT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
     "DNT": "1",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
@@ -37,6 +38,8 @@ WEB_SEARCH_MAX_RESULTS = 10
 # Extracted pages flow into every downstream role's prompt, so cap them
 # (AutoMAS agents manage their own context and read pages untruncated).
 EXTRACT_MAX_LINES = int(os.environ.get("SWARM_EXTRACT_MAX_LINES", "300"))
+_EXTRACT_CACHE: dict[str, str] = {}
+_LAST_WIKIPEDIA_REQUEST = 0.0
 
 
 def _truncate_text(text: str, max_lines: int | None) -> str:
@@ -78,19 +81,22 @@ def do_web_search(query: str, max_results: int = WEB_SEARCH_MAX_RESULTS) -> str:
 
     results = data.get("results", [])[:max_results]
     if not results:
-        return f"No search results for: {query}"
+        return json.dumps({"query": query, "results": []})
 
-    parts = [f"Search results for: {query}"]
-    for infobox in data.get("infoboxes", []):
-        content = infobox.get("content")
-        if content:
-            parts.append(f"[Infobox] {content}")
-    for i, r in enumerate(results, 1):
-        title = r.get("title", "")
-        url = r.get("url", "")
-        snippet = r.get("content", "")
-        parts.append(f"{i}. {title}\n   {url}\n   {snippet}")
-    return "\n".join(parts)
+    return json.dumps(
+        {
+            "query": query,
+            "results": [
+                {
+                    "title": str(result.get("title", "")),
+                    "url": str(result.get("url", "")),
+                    "snippet": str(result.get("content", "")),
+                }
+                for result in results
+                if result.get("url")
+            ],
+        }
+    )
 
 
 def do_web_extract(url: str, max_lines: int | None = EXTRACT_MAX_LINES) -> str:
@@ -102,13 +108,27 @@ def do_web_extract(url: str, max_lines: int | None = EXTRACT_MAX_LINES) -> str:
             "web_extract unavailable: the 'markitdown' package is not installed "
             "(install automas-research or add markitdown to the environment)."
         )
+    if url in _EXTRACT_CACHE:
+        return _EXTRACT_CACHE[url]
     try:
         import requests
 
+        global _LAST_WIKIPEDIA_REQUEST
+        if "wikipedia.org" in url.lower():
+            remaining = 1.0 - (time.monotonic() - _LAST_WIKIPEDIA_REQUEST)
+            if remaining > 0:
+                time.sleep(remaining)
+            _LAST_WIKIPEDIA_REQUEST = time.monotonic()
         session = requests.Session()
         session.headers.update(_EXTRACT_HEADERS)
+        request = session.request
+        session.request = lambda *args, **kwargs: request(  # type: ignore[method-assign]
+            *args, timeout=20, **kwargs
+        )
         md = MarkItDown(requests_session=session)
         result = md.convert(url)
-        return _truncate_text(result.text_content, max_lines)
+        content = _truncate_text(result.text_content, max_lines)
+        _EXTRACT_CACHE[url] = content
+        return content
     except Exception as e:
         return f"Content extraction failed: {e}"

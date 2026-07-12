@@ -46,6 +46,23 @@ def test_automas_records_real_node_and_tool_calls():
     assert log.llm_calls[0].latency_ms == 12.0
 
 
+def test_automas_deduplicates_only_real_json_search_queries():
+    adapter = AutoMASAdapter()
+    tracker = TokenTracker("q", "question", "gold")
+    calls = [
+        SimpleNamespace(tool_name="web_search", args='{"query":"Ada Lovelace"}'),
+        SimpleNamespace(tool_name="web_search", args='{"query":"ada   lovelace"}'),
+        SimpleNamespace(tool_name="web_search", args='{"query":"Ada Lovelace biography"}'),
+    ]
+    trace = SimpleNamespace(
+        node_traces=[SimpleNamespace(node_id="n", model="m", usage=None, message_history=[SimpleNamespace(parts=calls)])]
+    )
+    limited, _ = adapter._record_pipeline_trace(tracker, SimpleNamespace(trace=trace), {"n": 1})
+    log = tracker.to_question_log("answer")
+    assert limited
+    assert [call.query for call in log.tool_calls] == ["ada lovelace", "ada lovelace biography"]
+
+
 def test_only_terminal_automas_agent_gets_final_answer_instruction():
     adapter = AutoMASAdapter()
     agents = [
