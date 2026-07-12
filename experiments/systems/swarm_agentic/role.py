@@ -11,6 +11,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 
 from benchlib.adapters.tools import do_calculate
+from benchlib.answers import FINAL_ANSWER_INSTRUCTION
 
 from .prompt.team_init import init_team
 from .web_tools import WEB_SEARCH_MAX_RESULTS, do_web_extract, do_web_search
@@ -80,6 +81,60 @@ def _tool_calculate(
 
 
 _URL_RE = re.compile(r"https?://[^\s)\]>\"']+")
+_RESULT_RE = re.compile(
+    r"^\d+\.\s*(?P<title>.*?)\n\s*(?P<url>https?://\S+)\n\s*(?P<snippet>.*?)(?=\n\d+\.\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_INVALID_QUERY_PREFIX = re.compile(r"^(step|goal|breakdown)\b", re.IGNORECASE)
+_MAX_QUERY_CHARS = 160
+_MIN_EXTRACT_CHARS = 200
+
+
+def validate_search_query(query: str, seen_queries: set[str] | None = None) -> str:
+    """Accept a concise, unique web query and reject planning prose."""
+    query = " ".join(query.split())
+    if not query or len(query) > _MAX_QUERY_CHARS or len(query.split()) > 18:
+        raise ValueError("search query must be a short query, not prose")
+    if _INVALID_QUERY_PREFIX.match(query):
+        raise ValueError("search query must not start with Step, Goal, or Breakdown")
+    normalized = query.casefold()
+    if seen_queries is not None and normalized in seen_queries:
+        raise ValueError("duplicate search query")
+    if seen_queries is not None:
+        seen_queries.add(normalized)
+    return query
+
+
+def _search_candidates(source: str, task: str) -> list[str]:
+    """Rank URLs from result titles/snippets; never default to the first URL."""
+    terms = {word.lower() for word in re.findall(r"[A-Za-z0-9]{3,}", task)}
+    ranked: list[tuple[int, int, str]] = []
+    for index, match in enumerate(_RESULT_RE.finditer(source)):
+        url = match.group("url").rstrip(".,;")
+        text = f"{match.group('title')} {match.group('snippet')}".lower()
+        ranked.append((sum(term in text for term in terms), index, url))
+    if not ranked:
+        ranked = [(0, index, url.rstrip(".,;")) for index, url in enumerate(_URL_RE.findall(source))]
+    # Stable score sorting retains provider rank only as a tiebreaker.
+    return list(
+        dict.fromkeys(
+            url for _, _, url in sorted(ranked, key=lambda item: (-item[0], item[1]))
+        )
+    )
+
+
+def _bad_or_irrelevant_extraction(content: str, task: str) -> bool:
+    lowered = content.lower()
+    if (
+        len(content.strip()) < _MIN_EXTRACT_CHARS
+        or "403" in lowered
+        or "content extraction failed" in lowered
+        or "access denied" in lowered
+        or "\x00" in content
+    ):
+        return True
+    terms = {word.lower() for word in re.findall(r"[A-Za-z0-9]{5,}", task)}
+    return bool(terms) and not any(term in lowered for term in terms)
 
 
 def _tool_web_search(
@@ -88,8 +143,14 @@ def _tool_web_search(
     tracker: TokenTracker,
 ) -> str:
     query = others_outputs.strip() if others_outputs.strip() else task_instance
-    # Upstream roles may hand over prose instead of a query; keep it search-sized.
-    query = " ".join(query.split())[:300]
+    seen_queries = getattr(tracker, "_swarm_seen_queries", None)
+    if seen_queries is None:
+        seen_queries = set()
+        setattr(tracker, "_swarm_seen_queries", seen_queries)
+    try:
+        query = validate_search_query(query, seen_queries)
+    except ValueError as exc:
+        return f"Invalid search query: {exc}. Return only a concise factual search query."
     with tracker.track_tool("web_search", query, WEB_SEARCH_MAX_RESULTS) as results:
         result = do_web_search(query)
         results.append(result)
@@ -102,17 +163,26 @@ def _tool_web_extract(
     tracker: TokenTracker,
 ) -> str:
     source = others_outputs if others_outputs.strip() else task_instance
-    match = _URL_RE.search(source)
-    if not match:
+    candidates = _search_candidates(source, task_instance)
+    if not candidates:
         return (
-            "No URL found in the input. Pass a message containing an "
-            "http(s):// link, e.g. one picked from WebSearch results."
+            "No selectable URL found in search results. Pass ranked search results "
+            "with title, URL, and snippet."
         )
-    url = match.group(0).rstrip(".,;")
-    with tracker.track_tool("web_extract", url, 0) as results:
-        result = do_web_extract(url)
-        results.append(result[:500])
-    return result
+    attempted = getattr(tracker, "_swarm_extracted_urls", None)
+    if attempted is None:
+        attempted = set()
+        setattr(tracker, "_swarm_extracted_urls", attempted)
+    for url in candidates[:3]:
+        if url in attempted:
+            continue
+        attempted.add(url)
+        with tracker.track_tool("web_extract", url, 0) as results:
+            result = do_web_extract(url)
+            results.append(result[:500])
+        if not _bad_or_irrelevant_extraction(result, task_instance):
+            return result
+    return "No usable relevant source could be extracted from the selected search results."
 
 
 # ── Role ─────────────────────────────────────────────────────
@@ -172,13 +242,16 @@ class Role:
             template=ROLE_PROMPT,
         )
         chain = prompt | self.llm | StrOutputParser()
+        final_role = any(
+            marker in self.name.lower() for marker in ("final", "synth", "answer")
+        )
         input_vars = {
             "name": self.name,
             "responsibility": self.responsibility,
             "policy": self.policy,
             "instance": task_instance,
             "information": others_outputs,
-            "output": output,
+            "output": f"{output}\n\n{FINAL_ANSWER_INSTRUCTION}" if final_role else output,
         }
         response = chain.invoke(input_vars)
 

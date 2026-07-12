@@ -41,6 +41,7 @@ Use these guidelines when generating the function:
 - WebExtract input must contain an actual URL returned by WebSearch.
 - Calculator input must be a valid arithmetic expression and no prose.
 - The final role must return only the requested answer, not the research process.
+- The final role's requested output must require exactly `<answer>...</answer>` and no other text.
 - Return only one fenced ``python`` block containing ``def forward(team): ...``.
 - Do not include imports, helpers, top-level statements, or explanatory text in
   the code block.

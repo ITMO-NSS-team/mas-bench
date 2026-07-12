@@ -9,6 +9,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from benchlib.adapters.base import AbstractAdapter, register
+from benchlib.answers import parse_answer_tag
 from benchlib.tracing.schemas import QuestionLog
 from benchlib.tracing.tracker import TokenTracker
 
@@ -159,7 +160,7 @@ class SwarmAgenticAdapter(AbstractAdapter):
 
             func = set_forward(self._forward_code)
             team.reset_task(question)
-            answer = func(team)
+            answer = parse_answer_tag(func(team))
 
         except Exception as exc:
             tracker.set_error(f"{type(exc).__name__}: {exc}")

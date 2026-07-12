@@ -21,6 +21,11 @@ from _benchlib_systems.swarm_agentic.prompt.write_forward import (
     extract_forward_code,
     validate_forward_code,
 )
+from _benchlib_systems.swarm_agentic.role import (
+    _tool_web_extract,
+    validate_search_query,
+)
+from benchlib.tracing.tracker import TokenTracker
 
 
 VALID_PLAN = {
@@ -169,6 +174,35 @@ def test_forward_rejects_calculator_misuse(calculator_call):
         )
 
 
+def test_search_query_validation_rejects_prose_prefixes_and_duplicates():
+    seen = set()
+    assert validate_search_query("Ada Lovelace first computer program", seen)
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_search_query("ada lovelace first computer program", seen)
+    with pytest.raises(ValueError, match="Step"):
+        validate_search_query("Step 1: research Ada Lovelace", set())
+    with pytest.raises(ValueError, match="short query"):
+        validate_search_query("word " * 19, set())
+
+
+def test_web_extract_selects_ranked_url_and_falls_back(monkeypatch):
+    tracker = TokenTracker("q", "Who wrote Hamlet?", "William Shakespeare")
+    source = """1. Hamlet authorship\n   https://bad.example\n   Shakespeare wrote Hamlet
+2. Hamlet authorship\n   https://good.example\n   Shakespeare wrote Hamlet
+"""
+    calls = []
+
+    def fake_extract(url):
+        calls.append(url)
+        if "good" in url:
+            return "Shakespeare wrote Hamlet. " * 50
+        return "403 forbidden"
+
+    monkeypatch.setattr("_benchlib_systems.swarm_agentic.role.do_web_extract", fake_extract)
+    assert "Shakespeare" in _tool_web_extract("Who wrote Hamlet?", source, tracker)
+    assert calls == ["https://bad.example", "https://good.example"]
+
+
 class DummyAdapter(AbstractAdapter):
     def __init__(self, logs, init_error=None):
         super().__init__("worker")
@@ -255,7 +289,7 @@ def test_valid_initialization_reaches_worker_model(monkeypatch):
     monkeypatch.setattr(adapter, "_init_team", fake_init)
     monkeypatch.setattr(adapter, "_make_llm", lambda model=None, tracker=None: models.append(model) or object())
     monkeypatch.setattr("_benchlib_systems.swarm_agentic.adapter.Team", FakeTeam)
-    monkeypatch.setattr("_benchlib_systems.swarm_agentic.adapter.set_forward", lambda code: lambda team: "done")
+    monkeypatch.setattr("_benchlib_systems.swarm_agentic.adapter.set_forward", lambda code: lambda team: "<answer>done</answer>")
 
     adapter.initialize()
     answer, log = adapter.execute("q", "question", "gold")
