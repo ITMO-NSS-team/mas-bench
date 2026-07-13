@@ -23,19 +23,22 @@ The team already contains these fixed tool roles:
 
 - WebSearch: searches the web and returns URLs and snippets.
 - WebExtract: reads the contents of a selected URL.
-- Calculator: evaluates arithmetic expressions.
 
 Do NOT redefine these roles in the generated `roles` list. They may and should
 be referenced directly in the workflow.
 
+Every WebSearch step must be fed by a dedicated role whose only output is one
+short search query. A step that hands WebSearch a research plan or an analysis
+is invalid: the search would run on that prose.
+
 For factual research tasks, the workflow MUST contain:
 1. a reasoning step that determines what evidence is needed;
-2. at least one WebSearch step;
-3. at least one WebExtract step;
-4. a verification or evidence-assessment step;
-5. a final answer-synthesis step.
+2. a role that turns it into a single short search query;
+3. at least one WebSearch step;
+4. at least one WebExtract step;
+5. a verification or evidence-assessment step;
+6. a final answer-synthesis step.
 
-Calculator must only appear when arithmetic is genuinely required.
 Never replace a WebSearch or WebExtract step with a prose description of what
 someone should search for.
 
@@ -88,7 +91,7 @@ class TeamPlanError(ValueError):
     """A generated team plan could not be parsed or is unsafe to execute."""
 
 
-_FIXED_ROLES = {"WebSearch", "WebExtract", "Calculator"}
+_FIXED_ROLES = {"WebSearch", "WebExtract"}
 _REASONING_TERMS = ("reason", "analy", "evidence", "verify", "research")
 _SYNTHESIS_TERMS = ("synth", "final", "answer")
 
@@ -98,12 +101,24 @@ def _raw_response(raw: Any) -> str:
     return str(content)[:12_000]
 
 
+def _drop_fixed_role_duplicates(plan: TeamPlan) -> list[str]:
+    """Strip generated roles that shadow a fixed tool role, returning their names.
+
+    The prompt forbids redefining them, but meta-models do it anyway. The
+    duplicate is redundant, not harmful: ``Team.inject_tool_roles`` adds the real
+    ToolRole regardless, and workflow steps naming it resolve there — so drop it
+    rather than fail the whole run over a plan that is otherwise executable.
+    """
+    dropped = [role.Name for role in plan.roles if role.Name in _FIXED_ROLES]
+    if dropped:
+        plan.roles = [role for role in plan.roles if role.Name not in _FIXED_ROLES]
+    return dropped
+
+
 def _validate_plan(plan: TeamPlan) -> None:
     generated_names = {role.Name for role in plan.roles}
     if not generated_names:
         raise TeamPlanError("plan has no generated roles")
-    if generated_names & _FIXED_ROLES:
-        raise TeamPlanError("generated roles must not redefine fixed tool roles")
 
     role_text = [
         " ".join((role.Name, role.Responsibility, role.Policy)).lower()
@@ -159,11 +174,14 @@ def init_team(llm, logger):
                 raise TeamPlanError(str(result.get("parsing_error") or "no parsed plan"))
             if not isinstance(parsed, TeamPlan):
                 parsed = TeamPlan.model_validate(parsed)
+            dropped = _drop_fixed_role_duplicates(parsed)
             _validate_plan(parsed)
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             continue
 
+        if dropped:
+            logger.debug(f"Init Team: dropped redefined fixed roles: {dropped}")
         res = parsed.model_dump()
         log(logger, "Init Team", attempt_prompt, res)
         return res

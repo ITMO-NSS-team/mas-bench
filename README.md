@@ -28,8 +28,9 @@ uv sync                               # harness only
 uv sync --group swarm_agentic         # + SwarmAgentic deps
 uv pip install -e automas-research/   # + AutoMAS (vendored local source)
 
-# SearXNG (shared web search backend for both systems; installs + starts in Docker,
-# then set SEARXNG_URL=http://localhost:18888 in .env)
+# SearXNG (shared web search backend for both systems; runs as a rootless podman
+# container, then set SEARXNG_URL=http://localhost:18888 in .env). Needs podman
+# (`brew install podman` on macOS); the podman VM is init'd/started for you.
 just searxng-start
 just searxng-check    # verify the JSON API responds
 

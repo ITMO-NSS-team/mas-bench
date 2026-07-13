@@ -24,6 +24,7 @@ from _benchlib_systems.swarm_agentic.prompt.write_forward import (
 )
 from _benchlib_systems.swarm_agentic.role import (
     _tool_web_extract,
+    _tool_web_search,
     validate_search_query,
 )
 from _benchlib_systems.swarm_agentic.web_tools import valid_extraction
@@ -100,7 +101,6 @@ FORWARD_ROLES = '''
 {"Name": "Answer Synthesizer", "Responsibility": "answer", "Policy": "answer"}
 {"Name": "WebSearch", "Responsibility": "search", "Policy": "tool"}
 {"Name": "WebExtract", "Responsibility": "extract", "Policy": "tool"}
-{"Name": "Calculator", "Responsibility": "calculate", "Policy": "tool"}
 '''
 VALID_FORWARD = '''def forward(team):
     query = team.call("Researcher", [], "short query")
@@ -137,10 +137,11 @@ def test_forward_rejects_missing_web_tools():
     with pytest.raises(ForwardCodeError, match="WebExtract"):
         validate_forward_code(
             '''def forward(team):
-    result = team.call("WebSearch", [], "URLs")
+    query = team.call("Researcher", [], "short query")
+    result = team.call("WebSearch", [query], "URLs")
     return result
 ''',
-            {"WebSearch", "WebExtract"},
+            {"WebSearch", "WebExtract", "Researcher"},
         )
 
 
@@ -148,32 +149,71 @@ def test_forward_rejects_unknown_roles():
     with pytest.raises(ForwardCodeError, match="unknown role"):
         validate_forward_code(
             '''def forward(team):
-    search = team.call("WebSearch", [], "URLs")
+    query = team.call("Researcher", [], "short query")
+    search = team.call("WebSearch", [query], "URLs")
     source = team.call("WebExtract", [search], "source")
     return team.call("Invented", [source], "answer")
 ''',
-            {"WebSearch", "WebExtract"},
+            {"WebSearch", "WebExtract", "Researcher"},
         )
 
 
-@pytest.mark.parametrize(
-    "calculator_call",
-    [
-        'team.call("Calculator", ["1 + 2"], "result")',
-        'team.call("Calculator", ["please calculate 1 + 2"], "result")',
-    ],
-)
-def test_forward_rejects_calculator_misuse(calculator_call):
-    with pytest.raises(ForwardCodeError, match="Calculator"):
+def test_forward_rejects_websearch_fed_a_research_plan():
+    # Inputs are concatenated into one string for the tool, so handing WebSearch a
+    # plan means SearXNG is queried with prose and the team's query is never used.
+    with pytest.raises(ForwardCodeError, match="search query"):
         validate_forward_code(
-            f'''def forward(team):
-    search = team.call("WebSearch", [], "URLs")
-    source = team.call("WebExtract", [search], "source")
-    result = {calculator_call}
+            '''def forward(team):
+    plan = team.call("Research Planner", [], "a research plan")
+    results = team.call("WebSearch", [plan], "URLs")
+    source = team.call("WebExtract", [results], "source")
     return source
 ''',
-            {"WebSearch", "WebExtract", "Calculator"},
+            {"WebSearch", "WebExtract", "Research Planner"},
         )
+
+
+def test_forward_accepts_websearch_fed_a_query_role():
+    validate_forward_code(
+        '''def forward(team):
+    plan = team.call("Research Planner", [], "a research plan")
+    query = team.call("Query Formulator", [plan], "one short search query and nothing else")
+    results = team.call("WebSearch", [query], "URLs")
+    source = team.call("WebExtract", [results], "source")
+    return source
+''',
+        {"WebSearch", "WebExtract", "Research Planner", "Query Formulator"},
+    )
+
+
+def test_forward_rejects_indexing_a_role_response():
+    # team.call returns a string; models routinely treat the WebSearch result as
+    # parsed JSON, which only fails at runtime, mid-benchmark.
+    with pytest.raises(ForwardCodeError, match="subscript"):
+        validate_forward_code(
+            '''def forward(team):
+    query = team.call("Researcher", [], "short query")
+    search = team.call("WebSearch", [query], "URLs")
+    source = team.call("WebExtract", [search[0]["url"]], "source")
+    return source
+''',
+            {"WebSearch", "WebExtract", "Researcher"},
+        )
+
+
+def test_search_query_validation_rejects_unfilled_placeholders():
+    # A role that cannot name the entity answers with a template; it is short and
+    # well-formed, so only an explicit check keeps the placeholder out of the query.
+    with pytest.raises(ValueError, match="placeholder"):
+        validate_search_query('site:.edu "[artist name]" alumni "[degree]"', set())
+    with pytest.raises(ValueError, match="placeholder"):
+        validate_search_query('"[COMMUNITY_NAME]" streets list site:.gov', set())
+    assert validate_search_query("Ne Zha 2 highest grossing animated film", set())
+
+
+def test_search_query_validation_rejects_a_heading():
+    with pytest.raises(ValueError, match="heading"):
+        validate_search_query("Additional literal search query for verification:", set())
 
 
 def test_search_query_validation_rejects_prose_prefixes_and_duplicates():
@@ -204,6 +244,52 @@ def test_web_extract_selects_ranked_url_and_falls_back(monkeypatch):
     monkeypatch.setattr("_benchlib_systems.swarm_agentic.role.do_web_extract", fake_extract)
     assert "Shakespeare" in _tool_web_extract("Who wrote Hamlet?", source, tracker)
     assert calls == ["https://bad.example", "https://good.example"]
+
+
+def test_web_search_uses_the_team_query_not_a_truncated_question(monkeypatch):
+    # parse_inputs concatenates every upstream role's output, so WebSearch is
+    # handed prose. The formulated query must still be the one that gets searched.
+    tracker = TokenTracker("q", "Who wrote Hamlet?", "William Shakespeare")
+    searched = []
+    monkeypatch.setattr(
+        "_benchlib_systems.swarm_agentic.role.do_web_search",
+        lambda query: searched.append(query) or json.dumps({"results": []}),
+    )
+    upstream = (
+        "Research Planner: We must establish the authorship of the play Hamlet, "
+        "checking scholarly consensus and any attribution disputes in the record.\n"
+        "Search query: Hamlet play authorship Shakespeare evidence"
+    )
+    _tool_web_search("Who wrote Hamlet? Answer precisely.", upstream, tracker)
+    assert searched == ["Hamlet play authorship Shakespeare evidence"]
+
+
+def test_web_extract_recovers_urls_from_an_intervening_role(monkeypatch):
+    # A generated workflow may route WebSearch -> reasoning role -> WebExtract, so
+    # WebExtract receives prose. It must still fetch a URL search returned -- and
+    # only such a URL, never one the role made up.
+    tracker = TokenTracker("q", "Who wrote Hamlet?", "William Shakespeare")
+    search_result = json.dumps({"results": [
+        {"title": "Hamlet", "url": "https://good.example", "snippet": "Shakespeare wrote Hamlet"},
+    ]})
+    monkeypatch.setattr(
+        "_benchlib_systems.swarm_agentic.role.do_web_search", lambda query: search_result
+    )
+    _tool_web_search("Who wrote Hamlet?", "hamlet author", tracker)
+
+    evaluation = (
+        "The most reliable source is https://good.example (encyclopedic). "
+        "I also recommend https://invented.example, which I know is authoritative."
+    )
+    fetched = []
+
+    def fake_extract(url):
+        fetched.append(url)
+        return "Shakespeare wrote Hamlet. " * 50
+
+    monkeypatch.setattr("_benchlib_systems.swarm_agentic.role.do_web_extract", fake_extract)
+    assert "Shakespeare" in _tool_web_extract("Who wrote Hamlet?", evaluation, tracker)
+    assert fetched == ["https://good.example"]
 
 
 def test_corrupted_extraction_is_rejected_before_caching():

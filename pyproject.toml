@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 
 dependencies = [
     "pydantic>=2.12.5",
+    "python-dotenv>=1.0.0",
     "pydantic-ai>=1.56.0,<2",
     "pydantic-monty>=0.0.18",
     "logly>=0.1.6,<0.2.0", # 0.2.0 changed logger.configure()'s signature
@@ -45,7 +46,9 @@ automas = [
 ]
 
 [tool.uv.sources]
-automas = { path = "../automas-research", editable = true }
+# The vendored copy inside this repo -- NOT the sibling ../automas-research,
+# which is a different (stale) project whose package is named `automaw`.
+automas = { path = "automas-research", editable = true }
 
 # automas installs from local source (its deps are heavy/optional, kept out of
 # this lockfile's default resolution):

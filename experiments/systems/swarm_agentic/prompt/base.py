@@ -1,8 +1,8 @@
 """Task and function descriptions for web-enabled question answering."""
 
 TASK_MINI = """
-Given a factual question, produce a correct, concise answer using web research,
-reasoning, and computation when necessary.
+Given a factual question, produce a correct, concise answer using web research
+and reasoning.
 
 The team has access to these fixed tool roles:
 
@@ -11,9 +11,6 @@ The team has access to these fixed tool roles:
 
 - WebExtract:
   Reads the contents of a URL selected from WebSearch results.
-
-- Calculator:
-  Evaluates a valid arithmetic expression.
 
 Workflow requirements:
 
@@ -29,11 +26,14 @@ Workflow requirements:
 
 4. Verify important claims using more than one search or source when possible.
 
-5. Use Calculator only when a real arithmetic expression must be evaluated.
-   Never send prose, research notes, or instructions to Calculator.
-
-6. Never respond with a plan describing how research could be conducted.
+5. Never respond with a plan describing how research could be conducted.
    Actually call the available research tools.
+
+6. A search query must be literal text to search for. Never emit a template with
+   placeholders such as [artist name], [YEAR], or <topic>: the search runs on the
+   text you write, so the placeholder itself gets searched. When the entity is
+   unknown, that is precisely what the search must find — query the properties
+   the question gives you and identify the entity from the results.
 
 7. The final answer must directly answer the question and should normally be
    one sentence or a short phrase.
@@ -52,11 +52,9 @@ Available fixed tool roles:
 
 - WebSearch
 - WebExtract
-- Calculator
 
 For external factual questions, the function must execute WebSearch and
-WebExtract before producing the final answer. Calculator should only be called
-when its input is a valid arithmetic expression.
+WebExtract before producing the final answer.
 
 The function must return the final answer as a string. It must not return a
 research plan, methodology, or description of work that was not actually

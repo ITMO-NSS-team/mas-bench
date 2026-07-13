@@ -1,6 +1,9 @@
 searxng_port := env("SEARXNG_PORT", "18888")
 searxng_host := env("SEARXNG_HOST", "127.0.0.1")
 searxng_dir := env("SEARXNG_DIR", if os() == "macos" { "~/Library/Application Support/fedotmas/searxng" } else { "~/.local/share/fedotmas/searxng" })
+searxng_container := env("SEARXNG_CONTAINER", "searxng-core")
+searxng_volume := env("SEARXNG_VOLUME", "searxng-cache")
+podman_machine := env("PODMAN_MACHINE", "podman-machine-default")
 
 # List discovered benchmarks and systems (only systems with installed deps appear).
 available:
@@ -16,8 +19,37 @@ download NAME:
 
 # SearXNG (shared web-search backend for both systems; point SEARXNG_URL in
 # .env at http://localhost:{{ searxng_port }})
+#
+# Runs as a single rootless podman container -- no compose, since `podman
+# compose` only shells out to an external provider (podman-compose /
+# docker-compose) that may not be installed.
 
-searxng-install:
+# Ensure the podman VM is up (macOS/Windows only; on Linux podman runs natively).
+[private]
+podman-machine:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ "$(uname -s)" != "Darwin" ]; then
+        exit 0
+    fi
+
+    if ! command -v podman >/dev/null 2>&1; then
+        echo "ERROR: podman is not installed (brew install podman)"
+        exit 1
+    fi
+
+    if podman machine inspect {{ podman_machine }} >/dev/null 2>&1; then
+        if [ "$(podman machine inspect {{ podman_machine }} --format '{{{{.State}}')" != "running" ]; then
+            echo "Starting podman machine '{{ podman_machine }}'..."
+            podman machine start {{ podman_machine }}
+        fi
+    else
+        echo "Initializing podman machine '{{ podman_machine }}'..."
+        podman machine init --now {{ podman_machine }}
+    fi
+
+searxng-install: podman-machine
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -26,15 +58,13 @@ searxng-install:
 
     mkdir -p "$dir"
 
-    if [ -f "$dir/docker-compose.yml" ]; then
-        docker compose -f "$dir/docker-compose.yml" down --remove-orphans 2>/dev/null || true
-    fi
+    podman rm -f {{ searxng_container }} 2>/dev/null || true
 
-    docker rm -f searxng-core searxng-valkey searxng 2>/dev/null || true
-
+    # Rootless podman writes into bind mounts as a subuid-mapped user, so a
+    # previous run can leave the config dir unwritable by $USER.
     if ! touch "$dir/.fedotmas-write-test" 2>/dev/null; then
         echo "Fixing ownership for $dir"
-        sudo chown -R "$USER:$USER" "$dir"
+        podman unshare chown -R 0:0 "$dir" 2>/dev/null || sudo chown -R "$USER:$USER" "$dir"
     else
         rm -f "$dir/.fedotmas-write-test"
     fi
@@ -75,55 +105,66 @@ searxng-install:
         printf '%s\n' '  image_proxy: false'
         printf '%s\n' '  method: "GET"'
         printf '%s\n' ''
+        printf '%s\n' '# SearXNG defaults to a 3s engine timeout. From inside the podman VM the'
+        printf '%s\n' '# scraping engines routinely need longer, and a timed-out engine returns'
+        printf '%s\n' '# nothing -- a benchmark question then silently researches an empty result'
+        printf '%s\n' '# set. Give them room.'
+        printf '%s\n' 'outgoing:'
+        printf '%s\n' '  request_timeout: 10.0'
+        printf '%s\n' '  max_request_timeout: 15.0'
+        printf '%s\n' '  pool_connections: 100'
+        printf '%s\n' '  pool_maxsize: 20'
+        printf '%s\n' ''
+        printf '%s\n' '# The stock general-category engines (duckduckgo, google cse, startpage) all'
+        printf '%s\n' '# throttle or CAPTCHA a benchmark-rate client, and a search that returns'
+        printf '%s\n' '# nothing is indistinguishable from a question with no answer. Widen the pool'
+        printf '%s\n' '# with engines that tolerate volume, so a blocked engine is survivable.'
         printf '%s\n' 'engines:'
+        printf '%s\n' '  - name: mojeek'
+        printf '%s\n' '    disabled: false'
+        printf '%s\n' '  - name: qwant'
+        printf '%s\n' '    disabled: false'
+        printf '%s\n' '  - name: wikipedia'
+        printf '%s\n' '    disabled: false'
         printf '%s\n' '  - name: wikidata'
-        printf '%s\n' '    disabled: true'
+        printf '%s\n' '    disabled: false'
+        printf '%s\n' '  - name: brave'
+        printf '%s\n' '    disabled: false'
+        printf '%s\n' '  - name: bing'
+        printf '%s\n' '    disabled: false'
         printf '%s\n' '  - name: ahmia'
         printf '%s\n' '    disabled: true'
         printf '%s\n' '  - name: torch'
-        printf '%s\n' '    disabled: true'
-        printf '%s\n' '  - name: google'
-        printf '%s\n' '    disabled: true'
-        printf '%s\n' '  - name: brave'
         printf '%s\n' '    disabled: true'
     } > "$dir/core-config/settings.yml"
 
     rm -f "$dir/core-config/limiter.toml"
 
-    {
-        printf '%s\n' 'services:'
-        printf '%s\n' '  searxng:'
-        printf '%s\n' '    image: searxng/searxng:latest'
-        printf '%s\n' '    container_name: searxng-core'
-        printf '%s\n' '    restart: unless-stopped'
-        printf '%s\n' '    ports:'
-        printf '%s\n' '      - "{{ searxng_host }}:{{ searxng_port }}:8080"'
-        printf '%s\n' '    volumes:'
-        printf '%s\n' '      - ./core-config:/etc/searxng'
-        printf '%s\n' '      - core-data:/var/cache/searxng'
-        printf '%s\n' ''
-        printf '%s\n' 'volumes:'
-        printf '%s\n' '  core-data:'
-    } > "$dir/docker-compose.yml"
-
     echo "SearXNG installed at $dir"
     echo "JSON API will be available at: http://localhost:{{ searxng_port }}/search?q=test&format=json"
     echo "Set SEARXNG_URL=http://localhost:{{ searxng_port }} in .env"
 
-searxng-start:
+searxng-start: podman-machine
     #!/usr/bin/env bash
     set -euo pipefail
 
     dir="{{ searxng_dir }}"
     dir="${dir/#\~/$HOME}"
 
-    if [ ! -f "$dir/docker-compose.yml" ] || [ ! -f "$dir/core-config/settings.yml" ]; then
+    if [ ! -f "$dir/core-config/settings.yml" ]; then
         just searxng-install
     fi
 
-    cd "$dir"
+    podman rm -f {{ searxng_container }} 2>/dev/null || true
+    podman volume create {{ searxng_volume }} >/dev/null 2>&1 || true
 
-    docker compose up -d --force-recreate
+    podman run -d \
+        --name {{ searxng_container }} \
+        --restart unless-stopped \
+        -p "{{ searxng_host }}:{{ searxng_port }}:8080" \
+        -v "$dir/core-config:/etc/searxng:Z" \
+        -v "{{ searxng_volume }}:/var/cache/searxng" \
+        docker.io/searxng/searxng:latest
 
     echo "SearXNG running at http://localhost:{{ searxng_port }}"
     echo "Checking JSON API..."
@@ -139,7 +180,7 @@ searxng-start:
     echo "ERROR: SearXNG started, but JSON API check failed."
     echo ""
     echo "Recent logs:"
-    docker compose logs --tail 160 searxng || docker logs searxng-core --tail 160
+    podman logs --tail 160 {{ searxng_container }}
     exit 1
 
 searxng-restart:
@@ -156,15 +197,12 @@ searxng-reinstall:
     dir="{{ searxng_dir }}"
     dir="${dir/#\~/$HOME}"
 
-    if [ -d "$dir" ] && [ -f "$dir/docker-compose.yml" ]; then
-        docker compose -f "$dir/docker-compose.yml" down --remove-orphans 2>/dev/null || true
-    fi
-
-    docker rm -f searxng-core searxng-valkey searxng 2>/dev/null || true
+    podman rm -f {{ searxng_container }} 2>/dev/null || true
+    podman volume rm -f {{ searxng_volume }} 2>/dev/null || true
 
     if [ -n "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "$HOME" ]; then
         if [ -d "$dir" ]; then
-            sudo chown -R "$USER:$USER" "$dir" 2>/dev/null || true
+            podman unshare chown -R 0:0 "$dir" 2>/dev/null || sudo chown -R "$USER:$USER" "$dir" 2>/dev/null || true
             chmod -R u+rwX "$dir" 2>/dev/null || true
         fi
         rm -rf "$dir"
@@ -180,46 +218,14 @@ searxng-stop:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    dir="{{ searxng_dir }}"
-    dir="${dir/#\~/$HOME}"
-
-    if [ ! -d "$dir" ] || [ ! -f "$dir/docker-compose.yml" ]; then
-        docker rm -f searxng-core searxng-valkey searxng 2>/dev/null || true
-        echo "SearXNG is not installed at $dir"
-        exit 0
-    fi
-
-    cd "$dir"
-    docker compose down --remove-orphans
+    podman rm -f {{ searxng_container }} 2>/dev/null || true
+    echo "SearXNG stopped"
 
 searxng-status:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    dir="{{ searxng_dir }}"
-    dir="${dir/#\~/$HOME}"
-
-    if [ ! -f "$dir/docker-compose.yml" ]; then
-        echo "SearXNG is not installed at $dir"
-        exit 1
-    fi
-
-    cd "$dir"
-    docker compose ps
+    podman ps -a --filter "name={{ searxng_container }}"
 
 searxng-logs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    dir="{{ searxng_dir }}"
-    dir="${dir/#\~/$HOME}"
-
-    if [ -f "$dir/docker-compose.yml" ]; then
-        cd "$dir"
-        docker compose logs -f --tail 200 searxng
-    else
-        docker logs -f --tail 200 searxng-core
-    fi
+    podman logs -f --tail 200 {{ searxng_container }}
 
 searxng-check:
     #!/usr/bin/env bash

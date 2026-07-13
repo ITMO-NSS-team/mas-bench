@@ -22,10 +22,24 @@ def _normalize_openrouter_model(model: str) -> str:
     return f"openai/{model}"
 
 
-MAX_SEARCHES = 3
-MAX_EXTRACTIONS = 3
-MAX_LLM_REQUESTS = 6
+MAX_SEARCHES = 10
+MAX_EXTRACTIONS = 10
+# Cap on pipeline size. Kept separate from the request budget below: one
+# constant used to serve as both, so a pool of N agents left no requests for
+# their tool loops and the pipeline died with "budget exhausted".
+MAX_AGENTS = 6
+# Hard per-question ceiling on calls to the worker model. A research agent needs
+# roughly one request per tool turn plus one to answer, so this must exceed
+# MAX_AGENTS by a wide margin or the pipeline cannot finish.
+MAX_LLM_REQUESTS = 60
 MAX_CONTEXT_CHARS = 24_000
+
+# AutoMAS' meta-agent may pick any server in automas' MCP registry (sandbox,
+# browser automation, media analysis, ...), while SwarmAgentic's tool roles are
+# fixed to web search + page extraction. On direct-QA search benchmarks that is
+# an information-access advantage, so restrict the pool to the one server whose
+# tools (`search`, `extract`) mirror SwarmAgentic's shims exactly.
+ALLOWED_MCP_SERVERS = frozenset({"web-search"})
 _RESEARCH_LIMITS = f"""
 Research limits are mandatory: make at most {MAX_SEARCHES} web searches and
 {MAX_EXTRACTIONS} web extractions total; never repeat a query; summarize each
@@ -159,18 +173,26 @@ class AutoMASAdapter(AbstractAdapter):
 
     @staticmethod
     def _limit_structure(pool: Any, graph: Any) -> tuple[Any, dict[str, list[str]]]:
-        """Cap worker requests by retaining a small, deterministic linear pipeline."""
+        """Cap pipeline size by retaining a small, deterministic linear pipeline."""
         agents = list(pool)
         if not agents:
             raise RuntimeError("AutoMAS generated an empty agent pool")
         # Keep the generated terminal agent plus early research agents, then make
         # dependencies explicit so no unbounded generated DAG can execute.
-        selected = agents[: MAX_LLM_REQUESTS - 1]
+        selected = agents[: MAX_AGENTS - 1]
         if agents[-1] not in selected:
             selected.append(agents[-1])
-        selected = selected[:MAX_LLM_REQUESTS]
+        selected = selected[:MAX_AGENTS]
         for agent in selected:
             agent.instructions = f"{agent.instructions}\n\n{_RESEARCH_LIMITS}"
+            # Also drops names the meta-agent invents from the prompt's examples
+            # (`tavily-search`, `filesystem`, ...), which would otherwise raise
+            # "Unknown MCP server" when the toolset is built.
+            agent.mcp_tools = [
+                tool
+                for tool in (getattr(agent, "mcp_tools", None) or [])
+                if tool in ALLOWED_MCP_SERVERS
+            ]
         # Only the terminal agent formats the final answer. Research agents must
         # return useful evidence rather than prematurely emitting an answer tag.
         selected[-1].instructions = (

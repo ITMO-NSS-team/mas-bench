@@ -37,9 +37,15 @@ Use these guidelines when generating the function:
 - Ensure the created function complete and correct to avoid runtime failures.
 - Preserve every WebSearch and WebExtract step specified in the workflow.
 - Do not replace tool execution with an LLM-generated research plan.
-- WebSearch input must be a short search query, not a paragraph.
-- WebExtract input must contain an actual URL returned by WebSearch.
-- Calculator input must be a valid arithmetic expression and no prose.
+- Every team.call returns a plain string. It is never a dict or a list: do NOT
+  index, subscript, slice, or parse a role's response (`results[0]["url"]` is a
+  bug — `results` is text).
+- WebSearch takes exactly ONE input: the output of a role whose requested output
+  is a search query and nothing else (say so in that role's `output` argument).
+  Never pass it a research plan, an analysis, or several upstream outputs — every
+  input is concatenated into one string, so the search would run on that prose.
+- WebExtract input must be the WebSearch response passed through as-is. It picks
+  the URL out of those results itself; do not try to extract the URL yourself.
 - The final role must return only the requested answer, not the research process.
 - The final role's requested output must require exactly `<answer>...</answer>` and no other text.
 - Return only one fenced ``python`` block containing ``def forward(team): ...``.
@@ -61,22 +67,6 @@ class ForwardCodeError(ValueError):
 _FENCED_CODE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.IGNORECASE | re.DOTALL)
 _BANNED_NAMES = {"exec", "eval", "open", "os", "subprocess"}
 _CONTROL_FLOW_NODES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.Match)
-_ARITHMETIC_NODES = (
-    ast.Expression,
-    ast.BinOp,
-    ast.UnaryOp,
-    ast.Constant,
-    ast.Add,
-    ast.Sub,
-    ast.Mult,
-    ast.Div,
-    ast.FloorDiv,
-    ast.Mod,
-    ast.Pow,
-    ast.UAdd,
-    ast.USub,
-    ast.Load,
-)
 
 
 def extract_forward_code(response: str) -> str:
@@ -92,16 +82,6 @@ def _known_role_names(roles: str) -> set[str]:
     return set(re.findall(r'"Name"\s*:\s*"([^"]+)"', roles))
 
 
-def _is_arithmetic_expression(node: ast.AST) -> bool:
-    if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-        return False
-    try:
-        expression = ast.parse(node.value, mode="eval")
-    except SyntaxError:
-        return False
-    return all(isinstance(part, _ARITHMETIC_NODES) for part in ast.walk(expression))
-
-
 def _team_call_role(node: ast.Call) -> str | None:
     if not (
         isinstance(node.func, ast.Attribute)
@@ -115,18 +95,50 @@ def _team_call_role(node: ast.Call) -> str | None:
     return node.args[0].value
 
 
-def _validate_calculator_call(node: ast.Call, parents: dict[ast.AST, ast.AST]) -> None:
-    if not any(isinstance(parent, ast.If) for parent in _parents(node, parents)):
-        raise ForwardCodeError("Calculator calls must be conditional on arithmetic being required")
-    if len(node.args) < 2 or not isinstance(node.args[1], ast.List) or len(node.args[1].elts) != 1:
-        raise ForwardCodeError("Calculator must receive exactly one arithmetic expression")
-    if not _is_arithmetic_expression(node.args[1].elts[0]):
-        raise ForwardCodeError("Calculator input must be a literal arithmetic expression, not prose")
-
-
 def _validate_required_tool_call(node: ast.Call, parents: dict[ast.AST, ast.AST]) -> None:
     if any(isinstance(parent, _CONTROL_FLOW_NODES) for parent in _parents(node, parents)):
         raise ForwardCodeError("WebSearch and WebExtract calls must not be conditional")
+
+
+def _query_producing_vars(func: ast.FunctionDef) -> set[str]:
+    """Variables holding the output of a role asked to produce a search query."""
+    produced: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        role = _team_call_role(node.value)
+        if role is None:
+            continue
+        spec = node.value.args[2] if len(node.value.args) > 2 else None
+        output_spec = spec.value if isinstance(spec, ast.Constant) else ""
+        if "quer" not in f"{role} {output_spec}".lower():
+            continue
+        produced.update(
+            target.id for target in node.targets if isinstance(target, ast.Name)
+        )
+    return produced
+
+
+def _validate_search_input(node: ast.Call, query_vars: set[str]) -> None:
+    """WebSearch must be handed one role's query, not a pile of upstream prose.
+
+    Every input is concatenated into a single string for the tool, so passing a
+    research plan (or the plan *plus* the query) means the search runs on prose
+    and the team's actual query never reaches SearXNG.
+    """
+    inputs = node.args[1] if len(node.args) > 1 else None
+    if not isinstance(inputs, ast.List) or len(inputs.elts) != 1:
+        raise ForwardCodeError(
+            "WebSearch takes exactly one input: the output of a role that returns "
+            "a search query and nothing else"
+        )
+    source = inputs.elts[0]
+    if not isinstance(source, ast.Name) or source.id not in query_vars:
+        raise ForwardCodeError(
+            "WebSearch input must come from a role whose requested output is a "
+            "search query (its output description must say so); it must not be a "
+            "research plan, analysis, or evidence summary"
+        )
 
 
 def _parents(node: ast.AST, parents: dict[ast.AST, ast.AST]):
@@ -151,6 +163,7 @@ def validate_forward_code(code: str, known_roles: set[str]) -> None:
         raise ForwardCodeError("forward(team) cannot have decorators or default arguments")
 
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    query_vars = _query_producing_vars(func)
     called_roles: set[str] = set()
     has_value_return = False
     for node in ast.walk(func):
@@ -158,6 +171,15 @@ def validate_forward_code(code: str, known_roles: set[str]) -> None:
             raise ForwardCodeError("imports, nested functions, and classes are not allowed")
         if isinstance(node, ast.Name) and node.id in _BANNED_NAMES:
             raise ForwardCodeError(f"unsafe name is not allowed: {node.id}")
+        if isinstance(node, ast.Subscript):
+            # team.call() always returns a string, so any subscript is a model
+            # mistaking a role response for parsed JSON (`results[0]["url"]`).
+            # It would only blow up at runtime, mid-benchmark; reject it here so
+            # the retry gets a usable error.
+            raise ForwardCodeError(
+                "role responses are plain strings: do not index or subscript them "
+                "(pass the WebSearch response to WebExtract unchanged)"
+            )
         if isinstance(node, ast.Return) and node.value is not None:
             has_value_return = True
         if isinstance(node, ast.Call):
@@ -167,10 +189,10 @@ def validate_forward_code(code: str, known_roles: set[str]) -> None:
             if role not in known_roles:
                 raise ForwardCodeError(f"unknown role referenced: {role}")
             called_roles.add(role)
-            if role == "Calculator":
-                _validate_calculator_call(node, parents)
             if role in {"WebSearch", "WebExtract"}:
                 _validate_required_tool_call(node, parents)
+            if role == "WebSearch":
+                _validate_search_input(node, query_vars)
 
     if not has_value_return:
         raise ForwardCodeError("forward(team) must return a value")
@@ -219,7 +241,6 @@ Available Roles:
 {"Name": "Answer Synthesizer", "Responsibility": "Return a concise final answer", "Policy": "Use only verified evidence and answer directly."}
 {"Name": "WebSearch", "Responsibility": "Search the web and return URLs and snippets", "Policy": "Executes tool automatically."}
 {"Name": "WebExtract", "Responsibility": "Extract the contents of a URL", "Policy": "Executes tool automatically."}
-{"Name": "Calculator", "Responsibility": "Evaluate mathematical expressions", "Policy": "Executes tool automatically."}
 
 Workflow:
 [

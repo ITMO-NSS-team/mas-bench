@@ -33,3 +33,4 @@ logs/
 .DS_Store
 .claude/
 automas-research/
+automas_logs/

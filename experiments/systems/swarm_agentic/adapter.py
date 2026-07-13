@@ -10,12 +10,13 @@ from langchain_openai import ChatOpenAI
 
 from benchlib.adapters.base import AbstractAdapter, register
 from benchlib.answers import parse_answer_tag
+from benchlib.log import logger as bench_logger
 from benchlib.tracing.schemas import QuestionLog
 from benchlib.tracing.tracker import TokenTracker
 
 from .func import get_forward, set_forward
 from .logger import setup_logger
-from .role import Team
+from .role import Team, preview
 from .tracking import TrackerCallback
 
 
@@ -91,22 +92,33 @@ class SwarmAgenticAdapter(AbstractAdapter):
             )
             logger = setup_logger("init")
 
+            meta = self._meta_model or self._model
+            bench_logger.info(f"swarm: generating team (meta-model={meta})")
+
             # 1. Generate team (roles + workflow) from task description
             team = Team(llm=llm_init, logger=logger, tracker=tracker)
             team.init(llm=llm_init)
             team.inject_tool_roles()
+            bench_logger.info(
+                "swarm: team generated | "
+                f"roles={[role.name for role in team.roles]} | "
+                f"workflow={[step['Role'] for step in team.workflow]}"
+            )
 
             # 2. Generate forward code
+            bench_logger.info("swarm: generating forward function")
             self._forward_code = get_forward(
                 llm_init,
                 logger,
                 team.to_str(),
                 team.workflow,
             )
+            bench_logger.debug(f"swarm: forward code\n{self._forward_code}")
             self._team_dict = team.save_into_dict()
             self._initialized = True
         except Exception as exc:
             self._initialization_error = exc
+            bench_logger.error(f"swarm: initialization failed: {type(exc).__name__}: {exc}")
             raise
 
     def initialize(self) -> None:
@@ -160,10 +172,15 @@ class SwarmAgenticAdapter(AbstractAdapter):
 
             func = set_forward(self._forward_code)
             team.reset_task(question)
+            bench_logger.info(f"swarm: Q {question_id} | {preview(question)}")
             answer = parse_answer_tag(func(team))
+            bench_logger.info(f"swarm: Q {question_id} answered | {preview(answer)}")
 
         except Exception as exc:
             tracker.set_error(f"{type(exc).__name__}: {exc}")
+            bench_logger.error(
+                f"swarm: Q {question_id} failed | {type(exc).__name__}: {exc}"
+            )
             answer = ""
 
         return answer, tracker.to_question_log(answer)

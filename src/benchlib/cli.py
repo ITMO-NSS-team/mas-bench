@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+from dotenv import load_dotenv
+
 from benchlib.adapters import discover_adapters, get_adapter_class
 from benchlib.benchmarks import BenchmarkSpec, discover, load_spec
 from benchlib.evaluation.llm_judge import judge_model
@@ -112,6 +114,12 @@ def main() -> None:
     like ``--systems`` accepts several systems. Every benchmark gets its own
     results dir and provenance entry.
     """
+    # Adapters, the judge and the web tools all read their config (API keys,
+    # SEARXNG_URL, JUDGE_MODEL) straight from the environment, so .env must be
+    # in os.environ before anything else runs. Do not rely on AutoMAS' own
+    # load_dotenv(): it only fires if that package is imported at all.
+    load_dotenv()
+
     parser = _build_parser()
     args = parser.parse_args()
     if not args.benchmark:

@@ -1,11 +1,11 @@
 """Web search / page extraction for SwarmAgentic tool roles.
 
 Tool-parity shims: these hit the *same* backends as AutoMAS's MCP web toolset
-(``automas.mcp.servers.web``) — the same SearXNG instance with the same default
-engine list, and the same markitdown URL→Markdown pipeline with the same
-browser-like session headers — so on search benchmarks neither system has an
-information-access advantage. If the AutoMAS servers change their defaults,
-mirror the change here.
+(``automas.mcp.servers.web``) — search goes through ``benchlib.search``, which
+both systems call, and extraction uses the same markitdown URL→Markdown pipeline
+with the same browser-like session headers — so on search benchmarks neither
+system has an information-access advantage. If the AutoMAS servers change their
+extraction defaults, mirror the change here.
 """
 
 from __future__ import annotations
@@ -14,10 +14,7 @@ import os
 import json
 import time
 
-import httpx
-
-# Same default engine list as automas.mcp.servers.web.searxng_server.
-_DEFAULT_ENGINES = "bing,duckduckgo,brave,mullvadleta,mullvadleta brave,yahoo,presearch"
+from benchlib.search import SearchError, web_search
 
 # Same browser-like headers as automas.mcp.servers.web.server's extract().
 _EXTRACT_HEADERS = {
@@ -69,49 +66,12 @@ def valid_extraction(content: str) -> bool:
 
 
 def do_web_search(query: str, max_results: int = WEB_SEARCH_MAX_RESULTS) -> str:
-    """Search the web via the shared SearXNG instance; return results as text.
-
-    Same request shape as the AutoMAS searxng MCP tool's defaults:
-    general category, moderate safesearch, the same engine list.
-    """
-    instance_url = os.environ.get("SEARXNG_URL", "http://localhost:8888")
-    params = {
-        "q": query,
-        "format": "json",
-        "categories": "general",
-        "safesearch": 1,
-        "engines": _DEFAULT_ENGINES,
-    }
+    """Search the web via the shared backend; return results as a JSON string."""
     try:
-        response = httpx.get(f"{instance_url}/search", params=params, timeout=30.0)
-        response.raise_for_status()
-        data = response.json()
-    except httpx.HTTPStatusError as e:
-        return f"SearXNG HTTP error {e.response.status_code}: {e.response.text[:200]}"
-    except httpx.RequestError as e:
-        return (
-            f"SearXNG connection error: {e}. "
-            f"Check if SearXNG is running at {instance_url}"
-        )
-
-    results = data.get("results", [])[:max_results]
-    if not results:
-        return json.dumps({"query": query, "results": []})
-
-    return json.dumps(
-        {
-            "query": query,
-            "results": [
-                {
-                    "title": str(result.get("title", "")),
-                    "url": str(result.get("url", "")),
-                    "snippet": str(result.get("content", "")),
-                }
-                for result in results
-                if result.get("url")
-            ],
-        }
-    )
+        results = web_search(query, max_results)
+    except SearchError as e:
+        return str(e)
+    return json.dumps({"query": query, "results": results})
 
 
 def do_web_extract(url: str, max_lines: int | None = EXTRACT_MAX_LINES) -> str:
