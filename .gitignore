@@ -29,6 +29,7 @@ uv.lock
 results/
 logs/
 .env
+.tavily_keys
 
 .DS_Store
 .claude/

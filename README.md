@@ -74,3 +74,13 @@ just run --benchmark seal_0 seal_hard --systems automas swarm_agentic \
 just run --benchmark seal_0 --systems automas --generation-mode one_time
 just run --benchmark seal_0 --systems automas --generation-mode per_task
 ```
+
+For long runs, batch the questions and rotate Tavily keys. Put one key per line
+in a local, untracked file (for example `.tavily_keys`); each completed batch
+has its own results directory under `results/batches/`.
+
+```bash
+uv run --no-sync python scripts/run_batched.py \
+    --benchmark seal_0 --batch-size 10 --tavily-keys-file .tavily_keys \
+    --systems automas swarm_agentic
+```

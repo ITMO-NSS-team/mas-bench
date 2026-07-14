@@ -1,0 +1,72 @@
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+
+SCRIPT = Path(__file__).parents[1] / "scripts" / "run_batched.py"
+SPEC = importlib.util.spec_from_file_location("run_batched", SCRIPT)
+assert SPEC and SPEC.loader
+run_batched = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(run_batched)
+
+
+def test_batches_checkpoint_questions_and_rotate_tavily_keys(
+    tmp_path: Path, monkeypatch
+) -> None:
+    benchmark = tmp_path / "experiments/benchmarks/demo"
+    benchmark.mkdir(parents=True)
+    (benchmark / "manifest.toml").write_text('name = "demo"\n')
+    (benchmark / "questions.jsonl").write_text(
+        "".join(
+            json.dumps({"id": str(i), "question": f"q{i}", "answer": f"a{i}"})
+            + "\n"
+            for i in range(5)
+        )
+    )
+    keys = tmp_path / "keys"
+    keys.write_text("first\nsecond\n")
+    seen: list[tuple[str, list[str]]] = []
+
+    def fake_run(command: list[str], env: dict[str, str]):
+        data_dir = Path(command[command.index("--data-dir") + 1])
+        seen.append(
+            (
+                env["TAVILY_API_KEY"],
+                [json.loads(line)["id"] for line in (data_dir / "demo/questions.jsonl").read_text().splitlines()],
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(run_batched.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--benchmark",
+            "demo",
+            "--batch-size",
+            "2",
+            "--tavily-keys-file",
+            str(keys),
+            "--results-dir",
+            "batch-results",
+        ],
+    )
+
+    run_batched.main()
+
+    assert seen == [
+        ("first", ["0", "1"]),
+        ("second", ["2", "3"]),
+        ("first", ["4"]),
+    ]
+    checkpoints = sorted((tmp_path / "batch-results").glob("*/batch_*/batch.json"))
+    assert [json.loads(path.read_text())["status"] for path in checkpoints] == [
+        "completed",
+        "completed",
+        "completed",
+    ]
