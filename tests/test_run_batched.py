@@ -12,6 +12,11 @@ run_batched = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(run_batched)
 
 
+def test_display_key_masks_the_secret() -> None:
+    assert run_batched.display_key("tvly-dev-abcdefghijklmnopwxzy") == "tvly-dev-abc...wxzy"
+    assert run_batched.display_key("short-key") == "<redacted>"
+
+
 def test_batches_checkpoint_questions_and_rotate_tavily_keys(
     tmp_path: Path, monkeypatch
 ) -> None:

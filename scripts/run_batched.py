@@ -46,6 +46,13 @@ def tavily_keys(path: Path) -> list[str]:
     return keys
 
 
+def display_key(key: str) -> str:
+    """Return a recognizable but non-secret key label for logs."""
+    if len(key) <= 16:
+        return "<redacted>"
+    return f"{key[:12]}...{key[-4:]}"
+
+
 def main() -> None:
     args = parse_args()
     if args.batch_size < 1:
@@ -122,7 +129,8 @@ def main() -> None:
             env["TAVILY_API_KEY"] = keys[batch_index % len(keys)]
             print(
                 f"Batch {batch_index + 1}: questions {start + 1}-{start + len(batch_questions)} "
-                f"(Tavily key slot {batch_index % len(keys) + 1}/{len(keys)})"
+                f"(using Tavily key {display_key(env['TAVILY_API_KEY'])}; "
+                f"slot {batch_index % len(keys) + 1}/{len(keys)})"
             )
             completed = subprocess.run(command, env=env)
 
