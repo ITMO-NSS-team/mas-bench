@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
         help="One Tavily API key per line (blank lines and # comments are ignored).",
     )
     parser.add_argument(
+        "--reverse-tavily-keys",
+        action="store_true",
+        help="Rotate through the Tavily keys in reverse file order.",
+    )
+    parser.add_argument(
         "--systems", nargs="+", default=["automas", "swarm_agentic"]
     )
     parser.add_argument("--model", default="openai/gpt-4o-mini")
@@ -65,6 +70,8 @@ def main() -> None:
         raise FileNotFoundError(f"Benchmark files not found under {source}")
 
     keys = tavily_keys(args.tavily_keys_file)
+    if args.reverse_tavily_keys:
+        keys.reverse()
     questions = [json.loads(line) for line in questions_path.read_text().splitlines()]
     if not questions:
         raise ValueError(f"No questions found in {questions_path}")

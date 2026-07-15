@@ -57,6 +57,7 @@ def test_batches_checkpoint_questions_and_rotate_tavily_keys(
             "2",
             "--tavily-keys-file",
             str(keys),
+            "--reverse-tavily-keys",
             "--results-dir",
             "batch-results",
         ],
@@ -65,9 +66,9 @@ def test_batches_checkpoint_questions_and_rotate_tavily_keys(
     run_batched.main()
 
     assert seen == [
-        ("first", ["0", "1"]),
-        ("second", ["2", "3"]),
-        ("first", ["4"]),
+        ("second", ["0", "1"]),
+        ("first", ["2", "3"]),
+        ("second", ["4"]),
     ]
     checkpoints = sorted((tmp_path / "batch-results").glob("*/batch_*/batch.json"))
     assert [json.loads(path.read_text())["status"] for path in checkpoints] == [

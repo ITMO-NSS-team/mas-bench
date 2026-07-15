@@ -84,3 +84,5 @@ uv run --no-sync python scripts/run_batched.py \
     --benchmark seal_0 --batch-size 10 --tavily-keys-file .tavily_keys \
     --systems automas swarm_agentic
 ```
+
+Add `--reverse-tavily-keys` to start with the last key in the file.
