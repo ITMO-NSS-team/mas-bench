@@ -79,10 +79,11 @@ def llm_accuracy(
 
     result = _judge_agent().run_sync(prompt, model=model)
     if usage_sink is not None:
-        # `usage` is a property. It stays callable for back-compat, so the old
-        # defensive `usage()` call still worked -- but it emitted a deprecation
-        # warning on every judged question.
+        # pydantic-ai exposed this as a method in older releases and as a
+        # property in newer ones. The harness supports both installed versions.
         usage = result.usage
+        if callable(usage):
+            usage = usage()
         usage_sink["prompt"] = usage_sink.get("prompt", 0) + (usage.input_tokens or 0)
         usage_sink["completion"] = usage_sink.get("completion", 0) + (
             usage.output_tokens or 0
